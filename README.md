@@ -7,7 +7,7 @@ Debian relay / VPN landing host network optimization scripts.
 ## 功能
 
 - `main.sh` 一键入口：启动后默认设置 Debian 源、执行网络优化、安装并启用 `irqbalance`，然后进入菜单
-- 覆盖 `/etc/sysctl.conf`，让网络参数重启后持续生效
+- 覆盖 `/etc/sysctl.conf`，并链接到 `/etc/sysctl.d/99-network-optimization.conf`，让网络参数重启后持续生效
 - 开启 IPv4/IPv6 转发，适合中转、NAT、VPN 网关
 - 启用 `fq + bbr`，提升高延迟线路吞吐
 - 自动按内存估算 `conntrack` 容量，兼顾并发和内存

@@ -301,6 +301,8 @@ net.ipv6.neigh.default.gc_thresh3 = 65536
 EOF
 fi
 
+ln -sfn /etc/sysctl.conf /etc/sysctl.d/99-network-optimization.conf
+
 if [[ "${ENABLE_NIC_TUNING}" == "1" ]]; then
   install -d /usr/local/sbin /etc/default
   cat > /etc/default/network-max-tune <<EOF
