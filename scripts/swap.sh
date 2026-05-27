@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export TERM="${TERM:-xterm}"
+if [[ -z "${TERM:-}" || "${TERM}" == "dumb" ]]; then
+  export TERM=xterm
+fi
 
 SWAP_FILE="${SWAP_FILE:-/swapfile}"
 

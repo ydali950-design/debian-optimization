@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export TERM="${TERM:-xterm}"
+if [[ -z "${TERM:-}" || "${TERM}" == "dumb" ]]; then
+  export TERM=xterm
+fi
 
 DROPIN_DIR="/etc/ssh/sshd_config.d"
 DROPIN_FILE="${DROPIN_DIR}/99-root-login.conf"

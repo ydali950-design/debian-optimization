@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export TERM="${TERM:-xterm}"
+if [[ -z "${TERM:-}" || "${TERM}" == "dumb" ]]; then
+  export TERM=xterm
+fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 OPTIMIZER="${SCRIPT_DIR}/sysctl_optimization_debian_overwrite.sh"

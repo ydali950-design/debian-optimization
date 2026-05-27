@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export TERM="${TERM:-xterm}"
+if [[ -z "${TERM:-}" || "${TERM}" == "dumb" ]]; then
+  export TERM=xterm
+fi
 
 CONFIG_DIR="/etc/udp-multinic"
 CONFIG_FILE="${CONFIG_DIR}/rules.conf"
