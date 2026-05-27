@@ -357,14 +357,20 @@ for devpath in /sys/class/net/*; do
     per_queue_flow="$((RPS_FLOW_ENTRIES / rx_count))"
     (( per_queue_flow < 1024 )) && per_queue_flow=1024
     for queue in "${rx_queues[@]}"; do
-      [[ -w "${queue}/rps_cpus" ]] && echo "${MASK}" > "${queue}/rps_cpus" || true
-      [[ -w "${queue}/rps_flow_cnt" ]] && echo "${per_queue_flow}" > "${queue}/rps_flow_cnt" || true
+      if [[ -e "${queue}/rps_cpus" && -w "${queue}/rps_cpus" ]]; then
+        { echo "${MASK}" > "${queue}/rps_cpus"; } 2>/dev/null || true
+      fi
+      if [[ -e "${queue}/rps_flow_cnt" && -w "${queue}/rps_flow_cnt" ]]; then
+        { echo "${per_queue_flow}" > "${queue}/rps_flow_cnt"; } 2>/dev/null || true
+      fi
     done
   fi
 
   for queue in "${devpath}"/queues/tx-*; do
     [[ -e "${queue}" ]] || continue
-    [[ -w "${queue}/xps_cpus" ]] && echo "${MASK}" > "${queue}/xps_cpus" || true
+    if [[ -e "${queue}/xps_cpus" && -w "${queue}/xps_cpus" ]]; then
+      { echo "${MASK}" > "${queue}/xps_cpus"; } 2>/dev/null || true
+    fi
   done
 
   if command -v ethtool >/dev/null 2>&1; then
@@ -383,7 +389,9 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 for governor in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-  [[ -w "${governor}" ]] && echo performance > "${governor}" || true
+  if [[ -e "${governor}" && -w "${governor}" ]]; then
+    { echo performance > "${governor}"; } 2>/dev/null || true
+  fi
 done
 EOF
   chmod 0755 /usr/local/sbin/network-max-tune.sh
