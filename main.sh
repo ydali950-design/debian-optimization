@@ -187,7 +187,7 @@ show_status() {
   info "系统信息"
   printf "Debian: %s\n" "$(cat /etc/debian_version 2>/dev/null || true)"
   printf "Kernel: %s\n" "$(uname -r)"
-  printf "Memory: %s\n" "$(awk '/MemTotal:/ {printf \"%.0f MB\", $2/1024}' /proc/meminfo)"
+  printf "Memory: %s\n" "$(awk '/MemTotal:/ {printf "%.0f MB", $2/1024}' /proc/meminfo)"
 
   info "网络参数"
   printf "tcp_congestion_control: %s\n" "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
