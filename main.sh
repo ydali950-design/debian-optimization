@@ -9,6 +9,7 @@ OPTIMIZER="${SCRIPT_DIR}/sysctl_optimization_debian_overwrite.sh"
 SWAP_SCRIPT="${SCRIPT_DIR}/scripts/swap.sh"
 SSH_ROOT_SCRIPT="${SCRIPT_DIR}/scripts/ssh_root.sh"
 UDP_MULTINIC_SCRIPT="${SCRIPT_DIR}/scripts/udp_multinic.sh"
+MTU_MSS_SCRIPT="${SCRIPT_DIR}/scripts/mtu_mss.sh"
 MARK_FILE="/root/.debian_optimization_done"
 
 RED='\033[31;1m'
@@ -152,16 +153,27 @@ install_irqbalance() {
   ok "irqbalance 已安装并启用。"
 }
 
+enable_mtu_mss_fix() {
+  if [[ ! -f "${MTU_MSS_SCRIPT}" ]]; then
+    fail "未找到 ${MTU_MSS_SCRIPT}"
+    return 1
+  fi
+  chmod +x "${MTU_MSS_SCRIPT}"
+  bash "${MTU_MSS_SCRIPT}" enable
+  ok "MTU/MSS 修正已启用。"
+}
+
 default_setup() {
   if [[ "${SKIP_INIT:-0}" == "1" ]]; then
     ok "已跳过默认初始化。"
     return 0
   fi
 
-  warn "开始默认初始化：设置 Debian 源 -> 执行网络优化 -> 安装并启用 irqbalance。"
+  warn "开始默认初始化：设置 Debian 源 -> 执行网络优化 -> 启用 MTU/MSS 修正 -> 安装并启用 irqbalance。"
   set_debian_sources
   install_base_tools
   run_network_optimization "${PROFILE:-balanced}"
+  enable_mtu_mss_fix
   install_irqbalance
   touch "${MARK_FILE}"
   ok "默认初始化完成。"
@@ -218,9 +230,10 @@ main_menu() {
     printf " 5. Swap 管理\n"
     printf " 6. Root SSH 管理\n"
     printf " 7. UDP 多网卡防丢包映射\n"
-    printf " 8. 安装/管理 WARP\n"
-    printf " 9. 查看优化状态\n"
-    printf "10. 重启系统\n"
+    printf " 8. MTU/MSS 修正管理\n"
+    printf " 9. 安装/管理 WARP\n"
+    printf "10. 查看优化状态\n"
+    printf "11. 重启系统\n"
     printf " 0. 退出\n"
     printf "\n"
 
@@ -235,9 +248,10 @@ main_menu() {
       5) run_local_script "${SWAP_SCRIPT}" ;;
       6) run_local_script "${SSH_ROOT_SCRIPT}" ;;
       7) run_local_script "${UDP_MULTINIC_SCRIPT}" ;;
-      8) install_warp_menu; pause ;;
-      9) show_status; pause ;;
-      10)
+      8) run_local_script "${MTU_MSS_SCRIPT}" ;;
+      9) install_warp_menu; pause ;;
+      10) show_status; pause ;;
+      11)
         if confirm "确认重启系统吗？"; then
           reboot
         fi

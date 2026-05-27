@@ -14,6 +14,7 @@ Debian relay / VPN landing host network optimization scripts.
 - 调整 socket buffer、队列、SYN backlog、TIME_WAIT、UDP 参数
 - 配置 systemd limits，让服务进程也获得更高文件句柄限制
 - 创建开机网卡调优服务，自动设置 RPS/XPS、txqueuelen、ring buffer、offload
+- 默认启用 MTU/MSS 修正，自动添加 TCP MSS clamp，降低 VPN/隧道/中转链路因 MTU 不匹配导致的卡顿和掉速
 - 提供 Debian 专用 UDP 多网卡映射脚本，修正 UDP 多网卡回包源地址，减少 UDP 流量走错出口导致的丢包
 - 提供 swap 管理和 root SSH 管理脚本
 
@@ -33,12 +34,13 @@ bash main.sh
 ```bash
 设置 Debian 官方源
 执行 sysctl/network 优化
+启用 MTU/MSS 修正
 apt install irqbalance -y
 systemctl start irqbalance
 systemctl enable irqbalance
 ```
 
-执行完成后会进入菜单，可继续选择 swap、root SSH、UDP 多网卡映射、WARP、状态查看等功能。
+执行完成后会进入菜单，可继续选择 swap、root SSH、UDP 多网卡映射、MTU/MSS 修正、WARP、状态查看等功能。
 
 如果只想执行网络优化脚本：
 
@@ -98,6 +100,42 @@ bash scripts/udp_multinic.sh add 203.0.113.10 10.0.0.2 443
 ```
 
 注意：此脚本只支持 Debian，只做 IPv4->IPv4 或 IPv6->IPv6 的同协议 UDP 地址映射。IPv4/IPv6 跨协议转换应使用 Jool、TAYGA 等专门工具。
+
+## MTU/MSS 修正
+
+用于 Debian 10/11/12/13 的中转、NAT、VPN、落地机场景。默认使用 `--clamp-mss-to-pmtu`，让内核按路径 MTU 自动修正 TCP SYN 包里的 MSS，避免 TCP 包在隧道链路里过大导致分片、丢包或速度异常。
+
+默认启用：
+
+```bash
+bash scripts/mtu_mss.sh enable
+```
+
+指定固定 MSS：
+
+```bash
+bash scripts/mtu_mss.sh fixed 1360
+```
+
+查看状态：
+
+```bash
+bash scripts/mtu_mss.sh status
+```
+
+清理规则：
+
+```bash
+bash scripts/mtu_mss.sh disable
+```
+
+脚本会创建并启用：
+
+```text
+/etc/default/mtu-mss-fix
+/usr/local/sbin/mtu-mss-apply.sh
+/etc/systemd/system/mtu-mss-fix.service
+```
 
 ## 注意
 
