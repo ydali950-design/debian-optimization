@@ -281,7 +281,9 @@ menu() {
     yellow "说明：源 IP 和目标 IP 必须同为 IPv4 或同为 IPv6。"
     yellow "端口留空表示映射全部 UDP 端口。"
     printf "\n"
-    read -r -p "请输入数字: " num
+    if ! read -r -p "请输入数字: " num; then
+      return 0
+    fi
     case "${num}" in
       1)
         read -r -p "源 IP，本机入口/公网 IP: " src_ip

@@ -136,7 +136,9 @@ menu() {
     printf " 3. 删除 swap\n"
     printf " 4. 查看 swap 状态\n"
     printf " 0. 返回\n"
-    read -r -p "请输入数字: " num
+    if ! read -r -p "请输入数字: " num; then
+      return 0
+    fi
     case "${num}" in
       1) add_swap; read -r -n 1 -s -p "按任意键继续..."; printf "\n" ;;
       2)

@@ -122,7 +122,9 @@ menu() {
     printf " 3. 关闭 root 密码 SSH 登录\n"
     printf " 4. 查看 SSH 登录状态\n"
     printf " 0. 返回\n"
-    read -r -p "请输入数字: " num
+    if ! read -r -p "请输入数字: " num; then
+      return 0
+    fi
     case "${num}" in
       1) set_root_password; read -r -n 1 -s -p "按任意键继续..."; printf "\n" ;;
       2) enable_root_login; read -r -n 1 -s -p "按任意键继续..."; printf "\n" ;;

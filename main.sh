@@ -222,7 +222,9 @@ main_menu() {
     printf " 0. 退出\n"
     printf "\n"
 
-    read -r -p "请输入数字: " num
+    if ! read -r -p "请输入数字: " num; then
+      exit 0
+    fi
     case "${num}" in
       1) install_base_tools; pause ;;
       2) set_debian_sources; pause ;;
