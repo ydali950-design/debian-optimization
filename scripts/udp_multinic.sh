@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export TERM="${TERM:-xterm}"
 
 CONFIG_DIR="/etc/udp-multinic"
 CONFIG_FILE="${CONFIG_DIR}/rules.conf"

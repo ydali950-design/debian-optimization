@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export TERM="${TERM:-xterm}"
 
 SWAP_FILE="${SWAP_FILE:-/swapfile}"
 
