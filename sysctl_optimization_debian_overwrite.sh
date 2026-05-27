@@ -6,6 +6,18 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
+if [[ ! -r /etc/os-release ]]; then
+  echo "This script only supports Debian."
+  exit 1
+fi
+
+# shellcheck disable=SC1091
+. /etc/os-release
+if [[ "${ID:-}" != "debian" ]]; then
+  echo "This script only supports Debian. Current system ID=${ID:-unknown}."
+  exit 1
+fi
+
 BACKUP_SUFFIX="$(date +%Y%m%d%H%M%S)"
 MEM_KB="$(awk '/MemTotal:/ {print $2}' /proc/meminfo)"
 MEM_MB="$((MEM_KB / 1024))"
