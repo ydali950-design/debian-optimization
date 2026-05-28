@@ -81,7 +81,7 @@ fi
 # max: more aggressive buffers/queues for speed tests and 4G+ memory hosts.
 PROFILE="${PROFILE:-balanced}"
 TIMEZONE="${TIMEZONE:-Asia/Hong_Kong}"
-ENABLE_IPV6="${ENABLE_IPV6:-1}"
+DISABLE_IPV6="${DISABLE_IPV6:-1}"
 ENABLE_NIC_TUNING="${ENABLE_NIC_TUNING:-1}"
 
 # 0 is best for VPN/tunnel/asymmetric routing compatibility. Use 2 for loose RPF.
@@ -118,6 +118,36 @@ NF_CONNTRACK_HASH_SIZE="${NF_CONNTRACK_HASH_SIZE:-$((NF_CONNTRACK_MAX / 4))}"
 
 if [[ -n "${TIMEZONE}" ]]; then
   timedatectl set-timezone "${TIMEZONE}"
+fi
+
+backup_file /etc/gai.conf
+touch /etc/gai.conf
+sed -i '/^[[:space:]#]*precedence[[:space:]]\+::ffff:0:0\/96[[:space:]]/d' /etc/gai.conf
+cat >> /etc/gai.conf <<'EOF'
+
+# Prefer IPv4-mapped addresses for relay/VPN landing hosts.
+precedence ::ffff:0:0/96 100
+EOF
+
+cleanup_ip6_chain() {
+  local table="$1"
+  local base_chain="$2"
+  local custom_chain="$3"
+  command -v ip6tables >/dev/null 2>&1 || return 0
+  ip6tables -t "${table}" -L >/dev/null 2>&1 || return 0
+  while ip6tables -t "${table}" -C "${base_chain}" -j "${custom_chain}" 2>/dev/null; do
+    ip6tables -t "${table}" -D "${base_chain}" -j "${custom_chain}" 2>/dev/null || break
+  done
+  ip6tables -t "${table}" -F "${custom_chain}" 2>/dev/null || true
+  ip6tables -t "${table}" -X "${custom_chain}" 2>/dev/null || true
+}
+
+if [[ "${DISABLE_IPV6}" == "1" ]]; then
+  cleanup_ip6_chain mangle FORWARD MSS_FIX_FORWARD
+  cleanup_ip6_chain mangle OUTPUT MSS_FIX_OUTPUT
+  cleanup_ip6_chain nat PREROUTING UDP_MNIC_PRE
+  cleanup_ip6_chain nat POSTROUTING UDP_MNIC_POST
+  rm -f /etc/sysctl.d/61-udp-multinic.conf
 fi
 
 install -d /etc/modprobe.d /etc/modules-load.d
@@ -281,23 +311,15 @@ vm.dirty_background_ratio = 5
 vm.dirty_ratio = 20
 EOF
 
-if [[ "${ENABLE_IPV6}" == "1" ]]; then
+if [[ "${DISABLE_IPV6}" == "1" ]]; then
   cat >> /etc/sysctl.conf <<EOF
 
-# IPv6 forwarding and hardening
-net.ipv6.conf.all.forwarding = 1
-net.ipv6.conf.default.forwarding = 1
-net.ipv6.ip_nonlocal_bind = 1
-net.ipv6.conf.all.accept_redirects = 0
-net.ipv6.conf.default.accept_redirects = 0
-net.ipv6.conf.all.accept_source_route = 0
-net.ipv6.conf.default.accept_source_route = 0
-net.ipv6.ip6frag_high_thresh = ${IPFRAG_HIGH_THRESH}
-net.ipv6.ip6frag_low_thresh = ${IPFRAG_LOW_THRESH}
-net.ipv6.ip6frag_time = 30
-net.ipv6.neigh.default.gc_thresh1 = 8192
-net.ipv6.neigh.default.gc_thresh2 = 32768
-net.ipv6.neigh.default.gc_thresh3 = 65536
+# IPv6 disabled. This profile is IPv4-first for relay/VPN landing hosts.
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+net.ipv6.conf.all.forwarding = 0
+net.ipv6.conf.default.forwarding = 0
 EOF
 fi
 
@@ -429,3 +451,4 @@ echo "Done. Debian relay/VPN ${PROFILE} network profile applied."
 echo "Backups use suffix: .bak.${BACKUP_SUFFIX}"
 echo "memory=${MEM_MB}MB tcp_cc=${TCP_CC} nf_conntrack_max=${NF_CONNTRACK_MAX} hashsize=${NF_CONNTRACK_HASH_SIZE}"
 echo "socket_buffer_max=${SOCKET_BUFFER_MAX} netdev_backlog=${NETDEV_MAX_BACKLOG} rps_flow_entries=${RPS_FLOW_ENTRIES}"
+echo "ipv4_preferred=1 disable_ipv6=${DISABLE_IPV6}"

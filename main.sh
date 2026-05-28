@@ -6,6 +6,7 @@ fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 RAW_BASE_URL="${RAW_BASE_URL:-https://raw.githubusercontent.com/ydali950-design/debian-optimization/refs/heads/main}"
+AUTO_UPDATE_SUPPORT="${AUTO_UPDATE_SUPPORT:-1}"
 OPTIMIZER="${SCRIPT_DIR}/sysctl_optimization_debian_overwrite.sh"
 SWAP_SCRIPT="${SCRIPT_DIR}/scripts/swap.sh"
 SSH_ROOT_SCRIPT="${SCRIPT_DIR}/scripts/ssh_root.sh"
@@ -42,7 +43,7 @@ download_file() {
 
   install -d "$(dirname "${target}")"
   mv "${tmp}" "${target}"
-  chmod +x "${target}"
+  chmod 0755 "${target}"
 }
 
 ensure_support_scripts() {
@@ -53,9 +54,9 @@ ensure_support_scripts() {
     "scripts/ssh_root.sh" \
     "scripts/udp_multinic.sh" \
     "scripts/mtu_mss.sh"; do
-    if [[ ! -f "${SCRIPT_DIR}/${path}" ]]; then
+    if [[ "${AUTO_UPDATE_SUPPORT}" == "1" || ! -f "${SCRIPT_DIR}/${path}" ]]; then
       url="${RAW_BASE_URL}/${path}"
-      warn "未找到 ${SCRIPT_DIR}/${path}，正在下载..."
+      warn "正在同步 ${SCRIPT_DIR}/${path} ..."
       download_file "${url}" "${SCRIPT_DIR}/${path}"
     fi
   done
@@ -207,7 +208,7 @@ default_setup() {
     return 0
   fi
 
-  warn "开始默认初始化：设置 Debian 源 -> 执行网络优化 -> 启用 MTU/MSS 修正 -> 安装并启用 irqbalance。"
+  warn "开始默认初始化：设置 Debian 源 -> IPv4 优先/关闭 IPv6 -> 执行网络优化 -> 启用 MTU/MSS 修正 -> 安装并启用 irqbalance。"
   set_debian_sources
   install_base_tools
   run_network_optimization "${PROFILE:-balanced}"
@@ -234,6 +235,9 @@ install_warp_menu() {
 }
 
 show_status() {
+  local ipv4_precedence
+  ipv4_precedence="$(grep -E '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null | tail -n 1 || true)"
+
   info "系统信息"
   printf "Debian: %s\n" "$(cat /etc/debian_version 2>/dev/null || true)"
   printf "Kernel: %s\n" "$(uname -r)"
@@ -243,7 +247,8 @@ show_status() {
   printf "tcp_congestion_control: %s\n" "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
   printf "default_qdisc: %s\n" "$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
   printf "ipv4_forward: %s\n" "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo unknown)"
-  printf "ipv6_forward: %s\n" "$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo unknown)"
+  printf "ipv6_disabled: %s\n" "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo unknown)"
+  printf "ipv4_precedence: %s\n" "${ipv4_precedence:-missing}"
   printf "nf_conntrack_max: %s\n" "$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo unknown)"
   printf "ip_local_port_range: %s\n" "$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo unknown)"
 

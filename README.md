@@ -8,14 +8,14 @@ Debian relay / VPN landing host network optimization scripts.
 
 - `main.sh` 一键入口：启动后默认设置 Debian 源、执行网络优化、安装并启用 `irqbalance`，然后进入菜单
 - 覆盖 `/etc/sysctl.conf`，并链接到 `/etc/sysctl.d/99-network-optimization.conf`，让网络参数重启后持续生效
-- 开启 IPv4/IPv6 转发，适合中转、NAT、VPN 网关
+- 开启 IPv4 转发，设置 IPv4 优先，并默认关闭 IPv6
 - 启用 `fq + bbr`，提升高延迟线路吞吐
 - 自动按内存估算 `conntrack` 容量，兼顾并发和内存
 - 调整 socket buffer、队列、SYN backlog、TIME_WAIT、UDP 参数
 - 配置 systemd limits，让服务进程也获得更高文件句柄限制
 - 创建开机网卡调优服务，自动设置 RPS/XPS、txqueuelen、ring buffer、offload
-- 默认启用 MTU/MSS 修正，自动添加 TCP MSS clamp，降低 VPN/隧道/中转链路因 MTU 不匹配导致的卡顿和掉速
-- 提供 Debian 专用 UDP 多网卡映射脚本，修正 UDP 多网卡回包源地址，减少 UDP 流量走错出口导致的丢包
+- 默认启用 IPv4 MTU/MSS 修正，自动添加 TCP MSS clamp，降低 VPN/隧道/中转链路因 MTU 不匹配导致的卡顿和掉速
+- 提供 Debian 专用 IPv4 UDP 多网卡映射脚本，修正 UDP 多网卡回包源地址，减少 UDP 流量走错出口导致的丢包
 - 提供 swap 管理和 root SSH 管理脚本
 
 ## 使用
@@ -33,6 +33,7 @@ bash main.sh
 
 ```bash
 设置 Debian 官方源
+设置 IPv4 优先并关闭 IPv6
 执行 sysctl/network 优化
 启用 MTU/MSS 修正
 apt install irqbalance -y
@@ -65,7 +66,7 @@ reboot
 ```bash
 PROFILE=balanced      # 默认，速度和内存更均衡
 PROFILE=max           # 更激进，适合冲测速或大内存机器
-ENABLE_IPV6=1         # 默认开启 IPv6 转发
+DISABLE_IPV6=1        # 默认关闭 IPv6
 ENABLE_NIC_TUNING=1   # 默认启用网卡调优服务
 RP_FILTER=0           # 默认关闭反向路径过滤，适合隧道/多线路
 SKIP_INIT=1           # 执行 main.sh 时跳过默认初始化，直接进入菜单
@@ -74,12 +75,12 @@ SKIP_INIT=1           # 执行 main.sh 时跳过默认初始化，直接进入�
 示例：
 
 ```bash
-PROFILE=max ENABLE_IPV6=0 bash sysctl_optimization_debian_overwrite.sh
+PROFILE=max DISABLE_IPV6=1 bash sysctl_optimization_debian_overwrite.sh
 ```
 
 ## UDP 多网卡映射
 
-用于一台 Debian 机器多网卡、多 IP 的 UDP 落地场景。它通过 UDP DNAT/SNAT 修正回包源地址，避免 UDP 流量因为回包源地址或出口不一致被上游、客户端或策略路由丢弃。
+用于一台 Debian 机器多网卡、多 IPv4 的 UDP 落地场景。它通过 UDP DNAT/SNAT 修正回包源地址，避免 UDP 流量因为回包源地址或出口不一致被上游、客户端或策略路由丢弃。
 
 菜单执行：
 
@@ -90,7 +91,7 @@ bash scripts/udp_multinic.sh
 命令行添加规则：
 
 ```bash
-bash scripts/udp_multinic.sh add <源IP> <目标IP> [UDP端口]
+bash scripts/udp_multinic.sh add <源IPv4> <目标IPv4> [UDP端口]
 ```
 
 示例：
@@ -99,11 +100,11 @@ bash scripts/udp_multinic.sh add <源IP> <目标IP> [UDP端口]
 bash scripts/udp_multinic.sh add 203.0.113.10 10.0.0.2 443
 ```
 
-注意：此脚本只支持 Debian，只做 IPv4->IPv4 或 IPv6->IPv6 的同协议 UDP 地址映射。IPv4/IPv6 跨协议转换应使用 Jool、TAYGA 等专门工具。
+注意：此脚本只支持 Debian，只做 IPv4->IPv4 的 UDP 地址映射。本仓库默认关闭 IPv6，并会清理旧版脚本留下的 IPv6 UDP 规则。
 
 ## MTU/MSS 修正
 
-用于 Debian 10/11/12/13 的中转、NAT、VPN、落地机场景。默认使用 `--clamp-mss-to-pmtu`，让内核按路径 MTU 自动修正 TCP SYN 包里的 MSS，避免 TCP 包在隧道链路里过大导致分片、丢包或速度异常。
+用于 Debian 10/11/12/13 的中转、NAT、VPN、落地机场景。默认使用 `--clamp-mss-to-pmtu`，让内核按路径 MTU 自动修正 TCP SYN 包里的 MSS，避免 TCP 包在隧道链路里过大导致分片、丢包或速度异常。默认只生成 IPv4 规则，并清理旧版脚本留下的 IPv6 MSS 规则。
 
 默认启用：
 

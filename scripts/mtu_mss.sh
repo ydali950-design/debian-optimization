@@ -152,6 +152,17 @@ flush_or_create() {
   remove_jump "${family}" OUTPUT "${CHAIN_OUTPUT}"
 }
 
+delete_family() {
+  local family="$1"
+  remove_jump "${family}" FORWARD "${CHAIN_FORWARD}"
+  remove_jump "${family}" OUTPUT "${CHAIN_OUTPUT}"
+  table_available "${family}" || return 0
+  ipt "${family}" -t mangle -F "${CHAIN_FORWARD}" 2>/dev/null || true
+  ipt "${family}" -t mangle -F "${CHAIN_OUTPUT}" 2>/dev/null || true
+  ipt "${family}" -t mangle -X "${CHAIN_FORWARD}" 2>/dev/null || true
+  ipt "${family}" -t mangle -X "${CHAIN_OUTPUT}" 2>/dev/null || true
+}
+
 add_mss_rule() {
   local family="$1"
   local chain="$2"
@@ -183,11 +194,9 @@ apply_family() {
 
 modprobe ip_tables 2>/dev/null || true
 modprobe iptable_mangle 2>/dev/null || true
-modprobe ip6_tables 2>/dev/null || true
-modprobe ip6table_mangle 2>/dev/null || true
 
 apply_family v4
-apply_family v6
+delete_family v6
 EOF
   chmod 0755 "${APPLY_SCRIPT}"
 }
@@ -222,7 +231,7 @@ enable_rules() {
   write_service
   "${APPLY_SCRIPT}"
   systemctl enable --now mtu-mss-fix.service
-  green "MTU/MSS 修正已启用：mode=${mode} forward=${clamp_forward} output=${clamp_output}"
+  green "MTU/MSS 修正已启用：mode=${mode} forward=${clamp_forward} output=${clamp_output} ipv6=0"
 }
 
 disable_rules() {
@@ -248,8 +257,7 @@ status() {
   iptables -t mangle -S "${CHAIN_OUTPUT}" 2>/dev/null || true
 
   green "IPv6 mangle 规则："
-  ip6tables -t mangle -S "${CHAIN_FORWARD}" 2>/dev/null || true
-  ip6tables -t mangle -S "${CHAIN_OUTPUT}" 2>/dev/null || true
+  yellow "默认关闭并清理。"
 
   green "服务状态："
   systemctl is-enabled mtu-mss-fix.service 2>/dev/null || true

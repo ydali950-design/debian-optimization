@@ -81,9 +81,8 @@ validate_rule() {
     exit 1
   fi
 
-  if [[ "${src_family}" != "${dst_family}" ]]; then
-    red "iptables NAT 不适合直接做 IPv4/IPv6 跨协议 UDP 地址转换。"
-    red "请使用同协议地址：IPv4->IPv4 或 IPv6->IPv6。"
+  if [[ "${src_family}" != "v4" || "${dst_family}" != "v4" ]]; then
+    red "当前仓库默认关闭 IPv6。UDP 多网卡映射仅支持 IPv4->IPv4。"
     exit 1
   fi
 
@@ -108,8 +107,11 @@ net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
 net.ipv4.conf.all.arp_ignore = 1
 net.ipv4.conf.all.arp_announce = 2
-net.ipv6.conf.all.forwarding = 1
-net.ipv6.conf.default.forwarding = 1
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+net.ipv6.conf.all.forwarding = 0
+net.ipv6.conf.default.forwarding = 0
 EOF
   sysctl --system
 }
@@ -127,11 +129,7 @@ CONFIG_FILE="/etc/udp-multinic/rules.conf"
 
 detect_family() {
   local ip="$1"
-  if [[ "${ip}" == *:* ]]; then
-    echo v6
-  else
-    echo v4
-  fi
+  echo v4
 }
 
 ipt() {
@@ -154,11 +152,24 @@ ensure_chain() {
 }
 
 flush_chains() {
-  for family in v4 v6; do
-    ensure_chain "${family}"
-    ipt "${family}" -t nat -F UDP_MNIC_PRE 2>/dev/null || true
-    ipt "${family}" -t nat -F UDP_MNIC_POST 2>/dev/null || true
+  ensure_chain v4
+  ipt v4 -t nat -F UDP_MNIC_PRE 2>/dev/null || true
+  ipt v4 -t nat -F UDP_MNIC_POST 2>/dev/null || true
+}
+
+cleanup_ipv6_chains() {
+  local family="v6"
+  ipt "${family}" -t nat -L >/dev/null 2>&1 || return 0
+  while ipt "${family}" -t nat -C PREROUTING -j UDP_MNIC_PRE 2>/dev/null; do
+    ipt "${family}" -t nat -D PREROUTING -j UDP_MNIC_PRE 2>/dev/null || break
   done
+  while ipt "${family}" -t nat -C POSTROUTING -j UDP_MNIC_POST 2>/dev/null; do
+    ipt "${family}" -t nat -D POSTROUTING -j UDP_MNIC_POST 2>/dev/null || break
+  done
+  ipt "${family}" -t nat -F UDP_MNIC_PRE 2>/dev/null || true
+  ipt "${family}" -t nat -F UDP_MNIC_POST 2>/dev/null || true
+  ipt "${family}" -t nat -X UDP_MNIC_PRE 2>/dev/null || true
+  ipt "${family}" -t nat -X UDP_MNIC_POST 2>/dev/null || true
 }
 
 add_rule() {
@@ -180,13 +191,14 @@ add_rule() {
 
 modprobe nf_conntrack 2>/dev/null || true
 modprobe nf_nat 2>/dev/null || true
-modprobe nf_nat_ipv6 2>/dev/null || true
 
 flush_chains
+cleanup_ipv6_chains
 
 [[ -f "${CONFIG_FILE}" ]] || exit 0
 while read -r family src_ip dst_ip port; do
   [[ -z "${family:-}" || "${family}" == \#* ]] && continue
+  [[ "${family}" == "v4" ]] || continue
   add_rule "${family}" "${src_ip}" "${dst_ip}" "${port:-all}"
 done < "${CONFIG_FILE}"
 EOF
@@ -263,10 +275,8 @@ status() {
   iptables -t nat -S UDP_MNIC_PRE 2>/dev/null || true
   green "IPv4 UDP_MNIC_POST："
   iptables -t nat -S UDP_MNIC_POST 2>/dev/null || true
-  green "IPv6 UDP_MNIC_PRE："
-  ip6tables -t nat -S UDP_MNIC_PRE 2>/dev/null || true
-  green "IPv6 UDP_MNIC_POST："
-  ip6tables -t nat -S UDP_MNIC_POST 2>/dev/null || true
+  green "IPv6："
+  yellow "默认关闭并清理，UDP 多网卡映射仅使用 IPv4。"
 }
 
 menu() {
@@ -280,7 +290,7 @@ menu() {
     printf " 3. 清空本脚本创建的规则\n"
     printf " 0. 返回\n"
     printf "\n"
-    yellow "说明：源 IP 和目标 IP 必须同为 IPv4 或同为 IPv6。"
+    yellow "说明：源 IP 和目标 IP 必须同为 IPv4；本仓库默认关闭 IPv6。"
     yellow "端口留空表示映射全部 UDP 端口。"
     printf "\n"
     if ! read -r -p "请输入数字: " num; then
