@@ -5,6 +5,7 @@ if [[ -z "${TERM:-}" || "${TERM}" == "dumb" ]]; then
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+RAW_BASE_URL="${RAW_BASE_URL:-https://raw.githubusercontent.com/ydali950-design/debian-optimization/refs/heads/main}"
 OPTIMIZER="${SCRIPT_DIR}/sysctl_optimization_debian_overwrite.sh"
 SWAP_SCRIPT="${SCRIPT_DIR}/scripts/swap.sh"
 SSH_ROOT_SCRIPT="${SCRIPT_DIR}/scripts/ssh_root.sh"
@@ -22,6 +23,43 @@ info() { printf "${BLUE}%s${NC}\n" "$*"; }
 ok() { printf "${GREEN}%s${NC}\n" "$*"; }
 warn() { printf "${YELLOW}%s${NC}\n" "$*"; }
 fail() { printf "${RED}%s${NC}\n" "$*"; }
+
+download_file() {
+  local url="$1"
+  local target="$2"
+  local tmp
+  tmp="$(mktemp)"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${url}" -o "${tmp}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "${tmp}" "${url}"
+  else
+    fail "未找到 curl 或 wget，无法下载配套脚本。"
+    rm -f "${tmp}"
+    exit 1
+  fi
+
+  install -d "$(dirname "${target}")"
+  mv "${tmp}" "${target}"
+  chmod +x "${target}"
+}
+
+ensure_support_scripts() {
+  local path url
+  for path in \
+    "sysctl_optimization_debian_overwrite.sh" \
+    "scripts/swap.sh" \
+    "scripts/ssh_root.sh" \
+    "scripts/udp_multinic.sh" \
+    "scripts/mtu_mss.sh"; do
+    if [[ ! -f "${SCRIPT_DIR}/${path}" ]]; then
+      url="${RAW_BASE_URL}/${path}"
+      warn "未找到 ${SCRIPT_DIR}/${path}，正在下载..."
+      download_file "${url}" "${SCRIPT_DIR}/${path}"
+    fi
+  done
+}
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -264,5 +302,6 @@ main_menu() {
 
 require_root
 require_debian
+ensure_support_scripts
 default_setup
 main_menu
