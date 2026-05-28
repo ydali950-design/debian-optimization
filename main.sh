@@ -115,10 +115,50 @@ detect_codename() {
   printf "%s" "${codename}"
 }
 
+apt_update() {
+  apt-get \
+    -o Acquire::AllowReleaseInfoChange::Suite=true \
+    -o Acquire::AllowReleaseInfoChange::Version=true \
+    -o Acquire::AllowReleaseInfoChange::Codename=true \
+    update
+}
+
+is_debian_official_source_file() {
+  local file="$1"
+
+  if grep -Eiq 'download\.docker\.com|cloudflare|tailscale|nodesource|nginx\.org|packages\.microsoft\.com' "${file}"; then
+    return 1
+  fi
+
+  if grep -Eiq '(deb\.debian\.org/debian|security\.debian\.org/debian-security|ftp\.[^[:space:]/]+\.debian\.org/debian|httpredir\.debian\.org/debian|archive\.debian\.org/debian|archive\.debian\.org/debian-security)' "${file}"; then
+    return 0
+  fi
+
+  grep -Eiq '(^|[[:space:]])(buster|bullseye|bookworm|trixie)-backports([[:space:]]|$)' "${file}" \
+    && grep -Eiq '/debian([[:space:]]|$)|/debian-security([[:space:]]|$)' "${file}"
+}
+
+disable_conflicting_debian_source_files() {
+  local stamp file disabled
+  stamp="$(date +%Y%m%d%H%M%S)"
+
+  shopt -s nullglob
+  for file in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+    [[ -f "${file}" ]] || continue
+    if is_debian_official_source_file "${file}"; then
+      cp -a "${file}" "${file}.bak.${stamp}"
+      disabled="${file}.disabled.${stamp}"
+      mv "${file}" "${disabled}"
+      warn "已禁用旧 Debian 源文件：${file} -> ${disabled}"
+    fi
+  done
+  shopt -u nullglob
+}
+
 install_base_tools() {
   require_debian
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update
+  apt_update
   apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg lsb-release iproute2 ethtool procps gawk
   ok "基础组件安装完成。"
@@ -139,6 +179,8 @@ set_debian_sources() {
       ;;
   esac
 
+  disable_conflicting_debian_source_files
+
   if [[ -e /etc/apt/sources.list ]]; then
     cp -a /etc/apt/sources.list "${backup}"
   else
@@ -146,18 +188,21 @@ set_debian_sources() {
     backup="无，原文件不存在"
   fi
 
-  if [[ -f /etc/apt/sources.list.d/debian.sources ]]; then
-    cp -a /etc/apt/sources.list.d/debian.sources "/etc/apt/sources.list.d/debian.sources.bak.$(date +%Y%m%d%H%M%S)"
-    mv /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.disabled
-  fi
-
-  cat > /etc/apt/sources.list <<EOF
+  if [[ "${codename}" == "buster" ]]; then
+    cat > /etc/apt/sources.list <<EOF
+deb [check-valid-until=no] http://archive.debian.org/debian ${codename} ${components}
+deb [check-valid-until=no] http://archive.debian.org/debian ${codename}-updates ${components}
+deb [check-valid-until=no] http://archive.debian.org/debian-security ${codename}/updates ${components}
+EOF
+  else
+    cat > /etc/apt/sources.list <<EOF
 deb http://deb.debian.org/debian ${codename} ${components}
 deb http://deb.debian.org/debian ${codename}-updates ${components}
 deb http://security.debian.org/debian-security ${codename}-security ${components}
 EOF
+  fi
 
-  apt-get update
+  apt_update
   ok "Debian ${codename} 官方源已设置，原文件备份为 ${backup}"
 }
 

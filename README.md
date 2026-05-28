@@ -43,6 +43,8 @@ systemctl enable irqbalance
 
 执行完成后会进入菜单，可继续选择 swap、root SSH、UDP 多网卡映射、MTU/MSS 修正、WARP、状态查看等功能。
 
+设置 Debian 官方源时，脚本会清理 `/etc/apt/sources.list.d/` 里旧的 Debian 官方源残留，例如已经失效的 `bullseye-backports`，但会保留 Docker、Cloudflare、Tailscale、NodeSource 等常见第三方源。Debian 10 会自动使用 `archive.debian.org`，Debian 11/12/13 默认不启用 backports。
+
 如果只想执行网络优化脚本：
 
 ```bash
