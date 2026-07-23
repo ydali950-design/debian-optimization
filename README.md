@@ -17,6 +17,7 @@ Debian / Ubuntu relay / VPN landing host network optimization scripts.
 - 默认启用 IPv4 MTU/MSS 修正，自动添加 TCP MSS clamp，降低 VPN/隧道/中转链路因 MTU 不匹配导致的卡顿和掉速
 - 提供 Debian / Ubuntu IPv4 UDP 多网卡映射脚本，修正 UDP 多网卡回包源地址，减少 UDP 流量走错出口导致的丢包
 - 提供 swap 管理和 root SSH 管理脚本
+- 默认安装并启用 Chrony，重启服务后执行 `chronyc makestep` 立即校准系统时间
 
 ## 使用
 
@@ -33,6 +34,10 @@ bash main.sh
 
 ```bash
 刷新系统软件源
+apt install chrony -y
+systemctl enable chrony
+systemctl restart chrony
+chronyc makestep
 设置 IPv4 优先并强制关闭 IPv6
 执行 sysctl/network 优化
 启用 MTU/MSS 修正

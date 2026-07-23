@@ -253,6 +253,16 @@ install_irqbalance() {
   ok "irqbalance 已安装并启用。"
 }
 
+install_chrony() {
+  export DEBIAN_FRONTEND=noninteractive
+  apt_update
+  apt-get install -y chrony
+  systemctl enable chrony
+  systemctl restart chrony
+  chronyc makestep
+  ok "Chrony 已安装、启用并完成立即校时。"
+}
+
 enable_mtu_mss_fix() {
   if [[ ! -f "${MTU_MSS_SCRIPT}" ]]; then
     fail "未找到 ${MTU_MSS_SCRIPT}"
@@ -269,9 +279,10 @@ default_setup() {
     return 0
   fi
 
-  warn "开始默认初始化：刷新系统软件源 -> 关闭 IPv6 -> 执行网络优化 -> 启用 MTU/MSS 修正 -> 安装并启用 irqbalance。"
+  warn "开始默认初始化：刷新系统软件源 -> 安装并校准 Chrony -> 关闭 IPv6 -> 执行网络优化 -> 启用 MTU/MSS 修正 -> 安装并启用 irqbalance。"
   set_system_sources
   install_base_tools
+  install_chrony
   run_network_optimization "${PROFILE:-balanced}"
   enable_mtu_mss_fix
   install_irqbalance
