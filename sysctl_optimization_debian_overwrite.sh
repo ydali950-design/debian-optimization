@@ -7,16 +7,17 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 if [[ ! -r /etc/os-release ]]; then
-  echo "This script only supports Debian."
+  echo "This script only supports Debian or Ubuntu."
   exit 1
 fi
 
 # shellcheck disable=SC1091
 . /etc/os-release
-if [[ "${ID:-}" != "debian" ]]; then
-  echo "This script only supports Debian. Current system ID=${ID:-unknown}."
-  exit 1
-fi
+case "${ID:-}" in
+  debian|ubuntu) ;;
+  *) echo "This script only supports Debian or Ubuntu. Current system ID=${ID:-unknown}."; exit 1 ;;
+esac
+OS_PRETTY_NAME="${PRETTY_NAME:-${ID}}"
 
 BACKUP_SUFFIX="$(date +%Y%m%d%H%M%S)"
 MEM_KB="$(awk '/MemTotal:/ {print $2}' /proc/meminfo)"
@@ -81,7 +82,6 @@ fi
 # max: more aggressive buffers/queues for speed tests and 4G+ memory hosts.
 PROFILE="${PROFILE:-balanced}"
 TIMEZONE="${TIMEZONE:-Asia/Hong_Kong}"
-DISABLE_IPV6="${DISABLE_IPV6:-1}"
 ENABLE_NIC_TUNING="${ENABLE_NIC_TUNING:-1}"
 
 # 0 is best for VPN/tunnel/asymmetric routing compatibility. Use 2 for loose RPF.
@@ -142,13 +142,11 @@ cleanup_ip6_chain() {
   ip6tables -t "${table}" -X "${custom_chain}" 2>/dev/null || true
 }
 
-if [[ "${DISABLE_IPV6}" == "1" ]]; then
-  cleanup_ip6_chain mangle FORWARD MSS_FIX_FORWARD
-  cleanup_ip6_chain mangle OUTPUT MSS_FIX_OUTPUT
-  cleanup_ip6_chain nat PREROUTING UDP_MNIC_PRE
-  cleanup_ip6_chain nat POSTROUTING UDP_MNIC_POST
-  rm -f /etc/sysctl.d/61-udp-multinic.conf
-fi
+cleanup_ip6_chain mangle FORWARD MSS_FIX_FORWARD
+cleanup_ip6_chain mangle OUTPUT MSS_FIX_OUTPUT
+cleanup_ip6_chain nat PREROUTING UDP_MNIC_PRE
+cleanup_ip6_chain nat POSTROUTING UDP_MNIC_POST
+rm -f /etc/sysctl.d/61-udp-multinic.conf
 
 install -d /etc/modprobe.d /etc/modules-load.d
 cat > /etc/modprobe.d/99-network-optimization.conf <<EOF
@@ -206,7 +204,7 @@ chmod 0644 /etc/profile.d/99-ulimit.sh
 
 backup_file /etc/sysctl.conf
 cat > /etc/sysctl.conf <<EOF
-# Debian relay / VPN landing host balanced-max network optimization.
+# Debian / Ubuntu relay / VPN landing host balanced-max network optimization.
 
 # Routing and forwarding
 net.ipv4.ip_forward = 1
@@ -311,8 +309,7 @@ vm.dirty_background_ratio = 5
 vm.dirty_ratio = 20
 EOF
 
-if [[ "${DISABLE_IPV6}" == "1" ]]; then
-  cat >> /etc/sysctl.conf <<EOF
+cat >> /etc/sysctl.conf <<EOF
 
 # IPv6 disabled. This profile is IPv4-first for relay/VPN landing hosts.
 net.ipv6.conf.all.disable_ipv6 = 1
@@ -321,7 +318,6 @@ net.ipv6.conf.lo.disable_ipv6 = 1
 net.ipv6.conf.all.forwarding = 0
 net.ipv6.conf.default.forwarding = 0
 EOF
-fi
 
 ln -sfn /etc/sysctl.conf /etc/sysctl.d/99-network-optimization.conf
 
@@ -447,8 +443,8 @@ if command -v systemctl >/dev/null 2>&1; then
   fi
 fi
 
-echo "Done. Debian relay/VPN ${PROFILE} network profile applied."
+echo "Done. ${OS_PRETTY_NAME} relay/VPN ${PROFILE} network profile applied."
 echo "Backups use suffix: .bak.${BACKUP_SUFFIX}"
 echo "memory=${MEM_MB}MB tcp_cc=${TCP_CC} nf_conntrack_max=${NF_CONNTRACK_MAX} hashsize=${NF_CONNTRACK_HASH_SIZE}"
 echo "socket_buffer_max=${SOCKET_BUFFER_MAX} netdev_backlog=${NETDEV_MAX_BACKLOG} rps_flow_entries=${RPS_FLOW_ENTRIES}"
-echo "ipv4_preferred=1 disable_ipv6=${DISABLE_IPV6}"
+echo "ipv4_preferred=1 disable_ipv6=1"

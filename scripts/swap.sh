@@ -25,17 +25,17 @@ need_root() {
   fi
 }
 
-need_debian() {
+need_supported_os() {
   if [[ ! -r /etc/os-release ]]; then
-    red "仅支持 Debian 系统。"
+    red "仅支持 Debian 或 Ubuntu 系统。"
     exit 1
   fi
   # shellcheck disable=SC1091
   . /etc/os-release
-  if [[ "${ID:-}" != "debian" ]]; then
-    red "仅支持 Debian 系统，当前系统 ID=${ID:-unknown}。"
-    exit 1
-  fi
+  case "${ID:-}" in
+    debian|ubuntu) ;;
+    *) red "仅支持 Debian 或 Ubuntu 系统，当前系统 ID=${ID:-unknown}。"; exit 1 ;;
+  esac
 }
 
 check_openvz() {
@@ -158,7 +158,7 @@ menu() {
 }
 
 need_root
-need_debian
+need_supported_os
 check_openvz
 
 case "${1:-menu}" in

@@ -6,7 +6,7 @@ fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 RAW_BASE_URL="${RAW_BASE_URL:-https://raw.githubusercontent.com/ydali950-design/debian-optimization/refs/heads/main}"
-AUTO_UPDATE_SUPPORT="${AUTO_UPDATE_SUPPORT:-1}"
+AUTO_UPDATE_SUPPORT="${AUTO_UPDATE_SUPPORT:-0}"
 OPTIMIZER="${SCRIPT_DIR}/sysctl_optimization_debian_overwrite.sh"
 SWAP_SCRIPT="${SCRIPT_DIR}/scripts/swap.sh"
 SSH_ROOT_SCRIPT="${SCRIPT_DIR}/scripts/ssh_root.sh"
@@ -69,17 +69,23 @@ require_root() {
   fi
 }
 
-require_debian() {
+require_supported_os() {
   if [[ ! -r /etc/os-release ]]; then
-    fail "仅支持 Debian 系统。"
+    fail "仅支持 Debian 或 Ubuntu 系统。"
     exit 1
   fi
   # shellcheck disable=SC1091
   . /etc/os-release
-  if [[ "${ID:-}" != "debian" ]]; then
-    fail "仅支持 Debian 系统，当前系统 ID=${ID:-unknown}。"
-    exit 1
-  fi
+  case "${ID:-}" in
+    debian|ubuntu) ;;
+    *) fail "仅支持 Debian 或 Ubuntu 系统，当前系统 ID=${ID:-unknown}。"; exit 1 ;;
+  esac
+}
+
+system_id() {
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  printf "%s" "${ID}"
 }
 
 pause() {
@@ -156,7 +162,7 @@ disable_conflicting_debian_source_files() {
 }
 
 install_base_tools() {
-  require_debian
+  require_supported_os
   export DEBIAN_FRONTEND=noninteractive
   apt_update
   apt-get install -y --no-install-recommends \
@@ -165,7 +171,7 @@ install_base_tools() {
 }
 
 set_debian_sources() {
-  require_debian
+  require_supported_os
   local codename backup components
   codename="$(detect_codename)"
   backup="/etc/apt/sources.list.bak.$(date +%Y%m%d%H%M%S)"
@@ -204,6 +210,16 @@ EOF
 
   apt_update
   ok "Debian ${codename} 官方源已设置，原文件备份为 ${backup}"
+}
+
+set_system_sources() {
+  case "$(system_id)" in
+    debian) set_debian_sources ;;
+    ubuntu)
+      apt_update
+      ok "Ubuntu 软件源已刷新，保留系统现有镜像与组件配置。"
+      ;;
+  esac
 }
 
 run_network_optimization() {
@@ -253,8 +269,8 @@ default_setup() {
     return 0
   fi
 
-  warn "开始默认初始化：设置 Debian 源 -> IPv4 优先/关闭 IPv6 -> 执行网络优化 -> 启用 MTU/MSS 修正 -> 安装并启用 irqbalance。"
-  set_debian_sources
+  warn "开始默认初始化：刷新系统软件源 -> 关闭 IPv6 -> 执行网络优化 -> 启用 MTU/MSS 修正 -> 安装并启用 irqbalance。"
+  set_system_sources
   install_base_tools
   run_network_optimization "${PROFILE:-balanced}"
   enable_mtu_mss_fix
@@ -280,11 +296,14 @@ install_warp_menu() {
 }
 
 show_status() {
-  local ipv4_precedence
+  local ipv4_precedence os_pretty_name
   ipv4_precedence="$(grep -E '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null | tail -n 1 || true)"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  os_pretty_name="${PRETTY_NAME:-${ID}}"
 
   info "系统信息"
-  printf "Debian: %s\n" "$(cat /etc/debian_version 2>/dev/null || true)"
+  printf "System: %s\n" "${os_pretty_name}"
   printf "Kernel: %s\n" "$(uname -r)"
   printf "Memory: %s\n" "$(awk '/MemTotal:/ {printf "%.0f MB", $2/1024}' /proc/meminfo)"
 
@@ -308,11 +327,11 @@ main_menu() {
   while true; do
     clear
     ok "====================================="
-    ok " Debian Optimization"
+    ok " Debian / Ubuntu Optimization"
     ok " 中转机 / VPN 落地机网络优化"
     ok "====================================="
     printf " 1. 安装基础组件\n"
-    printf " 2. 设置 Debian 官方源\n"
+    printf " 2. 刷新系统软件源\n"
     printf " 3. 执行网络优化 balanced\n"
     printf " 4. 执行网络优化 max\n"
     printf " 5. Swap 管理\n"
@@ -330,7 +349,7 @@ main_menu() {
     fi
     case "${num}" in
       1) install_base_tools; pause ;;
-      2) set_debian_sources; pause ;;
+      2) set_system_sources; pause ;;
       3) run_network_optimization balanced; pause ;;
       4) run_network_optimization max; pause ;;
       5) run_local_script "${SWAP_SCRIPT}" ;;
@@ -351,7 +370,7 @@ main_menu() {
 }
 
 require_root
-require_debian
+require_supported_os
 ensure_support_scripts
 default_setup
 main_menu

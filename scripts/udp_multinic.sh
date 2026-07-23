@@ -25,17 +25,17 @@ need_root() {
   fi
 }
 
-need_debian() {
+need_supported_os() {
   if [[ ! -r /etc/os-release ]]; then
-    red "仅支持 Debian 系统。"
+    red "仅支持 Debian 或 Ubuntu 系统。"
     exit 1
   fi
   # shellcheck disable=SC1091
   . /etc/os-release
-  if [[ "${ID:-}" != "debian" ]]; then
-    red "仅支持 Debian 系统，当前系统 ID=${ID:-unknown}。"
-    exit 1
-  fi
+  case "${ID:-}" in
+    debian|ubuntu) ;;
+    *) red "仅支持 Debian 或 Ubuntu 系统，当前系统 ID=${ID:-unknown}。"; exit 1 ;;
+  esac
 }
 
 install_packages() {
@@ -82,7 +82,7 @@ validate_rule() {
   fi
 
   if [[ "${src_family}" != "v4" || "${dst_family}" != "v4" ]]; then
-    red "当前仓库默认关闭 IPv6。UDP 多网卡映射仅支持 IPv4->IPv4。"
+    red "当前仓库强制关闭 IPv6。UDP 多网卡映射仅支持 IPv4->IPv4。"
     exit 1
   fi
 
@@ -290,7 +290,7 @@ menu() {
     printf " 3. 清空本脚本创建的规则\n"
     printf " 0. 返回\n"
     printf "\n"
-    yellow "说明：源 IP 和目标 IP 必须同为 IPv4；本仓库默认关闭 IPv6。"
+    yellow "说明：源 IP 和目标 IP 必须同为 IPv4；本仓库强制关闭 IPv6。"
     yellow "端口留空表示映射全部 UDP 端口。"
     printf "\n"
     if ! read -r -p "请输入数字: " num; then
@@ -314,7 +314,7 @@ menu() {
 }
 
 need_root
-need_debian
+need_supported_os
 
 case "${1:-menu}" in
   add) add_rule "${2:?src_ip}" "${3:?dst_ip}" "${4:-all}" ;;

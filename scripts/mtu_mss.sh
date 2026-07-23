@@ -26,20 +26,16 @@ need_root() {
   fi
 }
 
-need_debian() {
+need_supported_os() {
   if [[ ! -r /etc/os-release ]]; then
-    red "仅支持 Debian 10/11/12/13。"
+    red "仅支持 Debian 或 Ubuntu 系统。"
     exit 1
   fi
   # shellcheck disable=SC1091
   . /etc/os-release
-  if [[ "${ID:-}" != "debian" ]]; then
-    red "仅支持 Debian，当前系统 ID=${ID:-unknown}。"
-    exit 1
-  fi
-  case "${VERSION_ID:-}" in
-    10|11|12|13) ;;
-    *) yellow "当前 Debian 版本为 ${VERSION_ID:-unknown}，脚本会继续尝试执行。" ;;
+  case "${ID:-}" in
+    debian|ubuntu) ;;
+    *) red "仅支持 Debian 或 Ubuntu 系统，当前系统 ID=${ID:-unknown}。"; exit 1 ;;
   esac
 }
 
@@ -277,7 +273,7 @@ menu() {
     printf " 0. 返回\n"
     printf "\n"
     yellow "默认会同时修正 FORWARD 和本机 OUTPUT 的 TCP SYN MSS。"
-    yellow "适用于 Debian 10/11/12/13 的中转、NAT、VPN、落地机场景。"
+    yellow "适用于 Debian 或 Ubuntu 的中转、NAT、VPN、落地机场景。"
     printf "\n"
 
     if ! read -r -p "请输入数字: " num; then
@@ -305,7 +301,7 @@ menu() {
 }
 
 need_root
-need_debian
+need_supported_os
 
 case "${1:-menu}" in
   enable|clamp) enable_rules clamp ;;
