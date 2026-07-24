@@ -135,6 +135,7 @@ migrate_legacy_sysctl() {
       managed["net.ipv4.tcp_no_metrics_save"] = 1
       managed["net.ipv4.ipfrag_low_thresh"] = 1
       managed["net.ipv4.ip_local_port_range"] = 1
+      managed["net.core.netdev_budget_usecs"] = 1
     }
     NR == FNR {
       line = $0
@@ -318,6 +319,10 @@ for numeric_name in \
   TCP_MAX_SYN_BACKLOG IPFRAG_HIGH_THRESH NOFILE_LIMIT FILE_MAX NF_CONNTRACK_MAX; do
   require_positive_decimal "${numeric_name}" "${!numeric_name}"
 done
+if (( 10#${NETDEV_BUDGET_USECS} > 2147483647 )); then
+  echo "NETDEV_BUDGET_USECS must not exceed 2147483647. Current value=${NETDEV_BUDGET_USECS}."
+  exit 1
+fi
 if [[ -z "${NF_CONNTRACK_HASH_SIZE}" ]]; then
   NF_CONNTRACK_HASH_SIZE="$((NF_CONNTRACK_MAX / 4))"
 fi
@@ -490,7 +495,6 @@ net.ipv4.tcp_window_scaling = 1
 # Packet processing budget
 net.core.netdev_max_backlog = ${NETDEV_MAX_BACKLOG}
 net.core.netdev_budget = ${NETDEV_BUDGET}
-net.core.netdev_budget_usecs = ${NETDEV_BUDGET_USECS}
 net.core.dev_weight = 64
 net.core.rps_sock_flow_entries = ${RPS_FLOW_ENTRIES}
 
@@ -590,6 +594,7 @@ migrate_legacy_sysctl
 install -d "$(dirname "${SYSCTL_APPLY_SCRIPT}")" "$(dirname "${SYSCTL_SERVICE_FILE}")" "$(dirname "${SYSCTL_DEFAULT_FILE}")"
 cat > "${SYSCTL_DEFAULT_FILE}" <<EOF
 NF_CONNTRACK_HASH_SIZE=${NF_CONNTRACK_HASH_SIZE}
+NETDEV_BUDGET_USECS=${NETDEV_BUDGET_USECS}
 EOF
 chmod 0644 "${SYSCTL_DEFAULT_FILE}"
 
@@ -605,6 +610,13 @@ if [[ -r "${SYSCTL_DEFAULT_FILE}" ]]; then
   . "${SYSCTL_DEFAULT_FILE}"
 fi
 : "${NF_CONNTRACK_HASH_SIZE:?Missing NF_CONNTRACK_HASH_SIZE in ${SYSCTL_DEFAULT_FILE}}"
+: "${NETDEV_BUDGET_USECS:?Missing NETDEV_BUDGET_USECS in ${SYSCTL_DEFAULT_FILE}}"
+
+if [[ ! "${NETDEV_BUDGET_USECS}" =~ ^[1-9][0-9]{0,9}$ ]] ||
+   (( 10#${NETDEV_BUDGET_USECS} > 2147483647 )); then
+  echo "Invalid NETDEV_BUDGET_USECS=${NETDEV_BUDGET_USECS} in ${SYSCTL_DEFAULT_FILE}." >&2
+  exit 1
+fi
 
 verify_sysctl_value() {
   local key="$1"
@@ -617,7 +629,46 @@ verify_sysctl_value() {
   fi
 }
 
+apply_netdev_budget_usecs() {
+  local key="net.core.netdev_budget_usecs"
+  local proc_file="/proc/sys/net/core/netdev_budget_usecs"
+  local current actual write_error
+
+  if [[ ! -r "${proc_file}" ]]; then
+    echo "Warning: ${key} is unavailable; keeping the running kernel defaults." >&2
+    return 0
+  fi
+
+  current="$(<"${proc_file}")"
+  if [[ ! "${current}" =~ ^(0|[1-9][0-9]{0,9})$ ]] ||
+     (( 10#${current} > 2147483647 )); then
+    echo "Cannot safely read ${key}: current=${current:-unavailable}." >&2
+    return 1
+  fi
+
+  if [[ "${current}" == "${NETDEV_BUDGET_USECS}" ]]; then
+    return 0
+  fi
+
+  if write_error="$(sysctl -q -w "${key}=${NETDEV_BUDGET_USECS}" 2>&1)"; then
+    actual="$(<"${proc_file}")"
+    if [[ "${actual}" != "${NETDEV_BUDGET_USECS}" ]]; then
+      echo "Failed to verify ${key}: expected=${NETDEV_BUDGET_USECS} actual=${actual:-unavailable}." >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  actual="$(<"${proc_file}")"
+  if [[ "${actual}" != "${current}" ]]; then
+    echo "Failed to preserve ${key} after the kernel rejected ${NETDEV_BUDGET_USECS}: before=${current} actual=${actual:-unavailable}." >&2
+    return 1
+  fi
+  echo "Warning: failed to apply ${key}=${NETDEV_BUDGET_USECS}; keeping current=${current}. ${write_error}" >&2
+}
+
 sysctl -e -p "${SYSCTL_FILE}"
+apply_netdev_budget_usecs
 verify_sysctl_value net.ipv4.ip_forward 1
 
 modprobe nf_conntrack 2>/dev/null || true
@@ -899,7 +950,7 @@ fi
 echo "Done. ${OS_PRETTY_NAME} userspace TCP/UDP relay/proxy ${PROFILE} profile applied."
 echo "Backups use suffix: .bak.${BACKUP_SUFFIX}"
 echo "memory=${MEM_MB}MB cpus=${CPU_COUNT} tcp_cc=${TCP_CC} nf_conntrack_max=${NF_CONNTRACK_MAX} hashsize=${NF_CONNTRACK_HASH_SIZE}"
-echo "socket_buffer_max=${SOCKET_BUFFER_MAX} netdev_backlog=${NETDEV_MAX_BACKLOG} rps_flow_entries=${RPS_FLOW_ENTRIES}"
+echo "socket_buffer_max=${SOCKET_BUFFER_MAX} netdev_backlog=${NETDEV_MAX_BACKLOG} netdev_budget_usecs=$(sysctl -n net.core.netdev_budget_usecs 2>/dev/null || echo unavailable) rps_flow_entries=${RPS_FLOW_ENTRIES}"
 echo "ipv4_preferred=1 disable_ipv6=1"
 if [[ -z "${IP_LOCAL_PORT_RANGE}" &&
       ( "${PORT_RANGE_WAS_MANAGED}" == "1" || "${LEGACY_PORT_RANGE_REMOVED}" == "1" ) ]]; then

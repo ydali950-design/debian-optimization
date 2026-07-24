@@ -54,18 +54,41 @@ download_file() {
   chmod 0755 "${target}"
 }
 
+support_script_needs_refresh() {
+  local path="$1"
+  case "${path}" in
+    sysctl_optimization_debian_overwrite_main2.sh)
+      file_sha256_is \
+        "${SCRIPT_DIR}/${path}" \
+        de2c23dde96fffba81210c58b8533bae6ad195a7f46a745e6f99078da19dd181
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 ensure_support_scripts() {
-  local path url
+  local path target url
   for path in \
     "sysctl_optimization_debian_overwrite_main2.sh" \
     "scripts/swap.sh" \
     "scripts/ssh_root.sh" \
     "scripts/udp_multinic_main2.sh" \
     "scripts/mtu_mss_main2.sh"; do
-    if [[ "${AUTO_UPDATE_SUPPORT}" == "1" || ! -f "${SCRIPT_DIR}/${path}" ]]; then
+    target="${SCRIPT_DIR}/${path}"
+    if [[ -e "${target}" || -L "${target}" ]] &&
+       [[ ! -f "${target}" || -L "${target}" ]]; then
+      fail "配套脚本路径不是普通文件，已停止同步：${target}"
+      exit 1
+    fi
+    if [[ "${AUTO_UPDATE_SUPPORT}" == "1" || ! -e "${target}" ]] ||
+       support_script_needs_refresh "${path}"; then
       url="${RAW_BASE_URL}/${path}"
-      warn "正在同步 ${SCRIPT_DIR}/${path} ..."
-      download_file "${url}" "${SCRIPT_DIR}/${path}"
+      warn "正在同步 ${target} ..."
+      download_file "${url}" "${target}"
+      if support_script_needs_refresh "${path}"; then
+        fail "同步后仍是已知故障版本，已停止执行：${target}"
+        exit 1
+      fi
     fi
   done
 }
@@ -708,6 +731,7 @@ show_status() {
   printf "rmem_max: %s\n" "$(sysctl -n net.core.rmem_max 2>/dev/null || echo unknown)"
   printf "wmem_max: %s\n" "$(sysctl -n net.core.wmem_max 2>/dev/null || echo unknown)"
   printf "netdev_max_backlog: %s\n" "$(sysctl -n net.core.netdev_max_backlog 2>/dev/null || echo unknown)"
+  printf "netdev_budget_usecs: %s\n" "$(sysctl -n net.core.netdev_budget_usecs 2>/dev/null || echo unavailable)"
   printf "mptcp_enabled: %s\n" "$(sysctl -n net.mptcp.enabled 2>/dev/null || echo unavailable)"
   printf "softnet_dropped: %s\n" "$(softnet_drop_total)"
 

@@ -78,7 +78,7 @@ PROFILE=max           # 更激进，适合冲测速或大内存机器
 ENABLE_NIC_TUNING=1   # 默认启用网卡调优服务
 RP_FILTER=0           # 默认关闭反向路径过滤，适合隧道/多线路
 SKIP_INIT=1           # 执行 main.sh 时跳过默认初始化，直接进入菜单
-AUTO_UPDATE_SUPPORT=1 # 显式从 RAW_BASE_URL 更新配套脚本，默认只下载缺失文件
+AUTO_UPDATE_SUPPORT=1 # 显式从 RAW_BASE_URL 更新配套脚本；main2 默认也会替换精确识别的已知故障版本
 ```
 
 示例：
