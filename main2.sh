@@ -7,6 +7,8 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 RAW_BASE_URL="${RAW_BASE_URL:-https://raw.githubusercontent.com/ydali950-design/debian-optimization/refs/heads/main}"
 AUTO_UPDATE_SUPPORT="${AUTO_UPDATE_SUPPORT:-0}"
+MAIN2_BUNDLE_VERSION=2026072502
+MAIN2_MANAGED_CONFIG_FORMAT=1
 OPTIMIZER="${SCRIPT_DIR}/sysctl_optimization_debian_overwrite_main2.sh"
 SWAP_SCRIPT="${SCRIPT_DIR}/scripts/swap.sh"
 SSH_ROOT_SCRIPT="${SCRIPT_DIR}/scripts/ssh_root.sh"
@@ -17,10 +19,81 @@ LEGACY_MARK_FILE="/root/.debian_optimization_done"
 LEGACY_BACKUP_SUFFIX="${LEGACY_BACKUP_SUFFIX:-}"
 LEGACY_UDP_PENDING_FILE="/etc/udp-multinic/.main2-migration-pending"
 LEGACY_RESTORE_STATE_DIR="/var/lib/debian-optimization-main2"
+MAIN2_INSTALL_STATE_FILE="${LEGACY_RESTORE_STATE_DIR}/install-state"
+MAIN2_LOCK_FILE="/run/debian-optimization-main2.lock"
 LEGACY_UDP_MIGRATION=0
 LEGACY_SYSCTL_MIGRATION=0
 LEGACY_SYSCTL_RESTORED=0
 LEGACY_BACKUP_ALREADY_RESTORED=0
+MAIN2_STATE_LOADED=0
+CURRENT_MAIN2_SHA256=""
+INSTALLED_BUNDLE_VERSION=0
+INSTALLED_BUNDLE_MAIN2_SHA256=""
+APPLIED_MAIN2_VERSION=0
+APPLIED_MAIN2_SHA256=""
+PENDING_MAIN2_VERSION=0
+PENDING_MAIN2_SHA256=""
+PENDING_REQUIRES_MANAGED_OVERWRITE=0
+PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN=1
+STORED_MANAGED_CONFIG_FORMAT=""
+STORED_MANAGED_CONFIG_SHA256=""
+STORED_PROFILE=""
+STORED_ENABLE_NIC_TUNING=""
+STORED_RP_FILTER=""
+STORED_MAXIMIZE_NIC_RING=""
+STORED_IP_LOCAL_PORT_RANGE=""
+STORED_SOCKET_BUFFER_DEFAULT=""
+STORED_SOCKET_BUFFER_MAX=""
+STORED_NETDEV_MAX_BACKLOG=""
+STORED_NETDEV_BUDGET=""
+STORED_NETDEV_BUDGET_USECS=""
+STORED_RPS_FLOW_ENTRIES=""
+STORED_TXQUEUELEN=""
+STORED_TCP_MAX_TW_BUCKETS=""
+STORED_TCP_MAX_SYN_BACKLOG=""
+STORED_IPFRAG_HIGH_THRESH=""
+STORED_NOFILE_LIMIT=""
+STORED_FILE_MAX=""
+STORED_NF_CONNTRACK_MAX=""
+STORED_NF_CONNTRACK_HASH_SIZE=""
+PROFILE_WAS_EXPLICIT=0
+ENABLE_NIC_TUNING_WAS_EXPLICIT=0
+RP_FILTER_WAS_EXPLICIT=0
+MAXIMIZE_NIC_RING_WAS_EXPLICIT=0
+IP_LOCAL_PORT_RANGE_WAS_EXPLICIT=0
+SOCKET_BUFFER_DEFAULT_WAS_EXPLICIT=0
+SOCKET_BUFFER_MAX_WAS_EXPLICIT=0
+NETDEV_MAX_BACKLOG_WAS_EXPLICIT=0
+NETDEV_BUDGET_WAS_EXPLICIT=0
+NETDEV_BUDGET_USECS_WAS_EXPLICIT=0
+RPS_FLOW_ENTRIES_WAS_EXPLICIT=0
+TXQUEUELEN_WAS_EXPLICIT=0
+TCP_MAX_TW_BUCKETS_WAS_EXPLICIT=0
+TCP_MAX_SYN_BACKLOG_WAS_EXPLICIT=0
+IPFRAG_HIGH_THRESH_WAS_EXPLICIT=0
+NOFILE_LIMIT_WAS_EXPLICIT=0
+FILE_MAX_WAS_EXPLICIT=0
+NF_CONNTRACK_MAX_WAS_EXPLICIT=0
+NF_CONNTRACK_HASH_SIZE_WAS_EXPLICIT=0
+[[ -n "${PROFILE+x}" ]] && PROFILE_WAS_EXPLICIT=1
+[[ -n "${ENABLE_NIC_TUNING+x}" ]] && ENABLE_NIC_TUNING_WAS_EXPLICIT=1
+[[ -n "${RP_FILTER+x}" ]] && RP_FILTER_WAS_EXPLICIT=1
+[[ -n "${MAXIMIZE_NIC_RING+x}" ]] && MAXIMIZE_NIC_RING_WAS_EXPLICIT=1
+[[ -n "${IP_LOCAL_PORT_RANGE+x}" ]] && IP_LOCAL_PORT_RANGE_WAS_EXPLICIT=1
+[[ -n "${SOCKET_BUFFER_DEFAULT+x}" ]] && SOCKET_BUFFER_DEFAULT_WAS_EXPLICIT=1
+[[ -n "${SOCKET_BUFFER_MAX+x}" ]] && SOCKET_BUFFER_MAX_WAS_EXPLICIT=1
+[[ -n "${NETDEV_MAX_BACKLOG+x}" ]] && NETDEV_MAX_BACKLOG_WAS_EXPLICIT=1
+[[ -n "${NETDEV_BUDGET+x}" ]] && NETDEV_BUDGET_WAS_EXPLICIT=1
+[[ -n "${NETDEV_BUDGET_USECS+x}" ]] && NETDEV_BUDGET_USECS_WAS_EXPLICIT=1
+[[ -n "${RPS_FLOW_ENTRIES+x}" ]] && RPS_FLOW_ENTRIES_WAS_EXPLICIT=1
+[[ -n "${TXQUEUELEN+x}" ]] && TXQUEUELEN_WAS_EXPLICIT=1
+[[ -n "${TCP_MAX_TW_BUCKETS+x}" ]] && TCP_MAX_TW_BUCKETS_WAS_EXPLICIT=1
+[[ -n "${TCP_MAX_SYN_BACKLOG+x}" ]] && TCP_MAX_SYN_BACKLOG_WAS_EXPLICIT=1
+[[ -n "${IPFRAG_HIGH_THRESH+x}" ]] && IPFRAG_HIGH_THRESH_WAS_EXPLICIT=1
+[[ -n "${NOFILE_LIMIT+x}" ]] && NOFILE_LIMIT_WAS_EXPLICIT=1
+[[ -n "${FILE_MAX+x}" ]] && FILE_MAX_WAS_EXPLICIT=1
+[[ -n "${NF_CONNTRACK_MAX+x}" ]] && NF_CONNTRACK_MAX_WAS_EXPLICIT=1
+[[ -n "${NF_CONNTRACK_HASH_SIZE+x}" ]] && NF_CONNTRACK_HASH_SIZE_WAS_EXPLICIT=1
 
 RED='\033[31;1m'
 GREEN='\033[32;1m'
@@ -33,64 +106,325 @@ ok() { printf "${GREEN}%s${NC}\n" "$*"; }
 warn() { printf "${YELLOW}%s${NC}\n" "$*"; }
 fail() { printf "${RED}%s${NC}\n" "$*"; }
 
+prepare_main2_lock_file() {
+  local create_status=0 lock_parent
+
+  if ! lock_parent="$(dirname -- "${MAIN2_LOCK_FILE}")"; then
+    fail "无法解析 main2 进程锁目录：${MAIN2_LOCK_FILE}"
+    return 1
+  fi
+  if [[ ! -d "${lock_parent}" || -L "${lock_parent}" ]]; then
+    fail "main2 进程锁目录不是安全的真实目录：${lock_parent}"
+    return 1
+  fi
+  if [[ ! -e "${MAIN2_LOCK_FILE}" && ! -L "${MAIN2_LOCK_FILE}" ]]; then
+    (umask 077; set -o noclobber; : > "${MAIN2_LOCK_FILE}") 2>/dev/null || create_status=$?
+    if [[ "${create_status}" != "0" &&
+          ! -e "${MAIN2_LOCK_FILE}" && ! -L "${MAIN2_LOCK_FILE}" ]]; then
+      fail "无法创建 main2 进程锁：${MAIN2_LOCK_FILE}"
+      return 1
+    fi
+  fi
+  if [[ -L "${MAIN2_LOCK_FILE}" || ! -f "${MAIN2_LOCK_FILE}" ]]; then
+    fail "main2 锁路径不是安全的普通文件：${MAIN2_LOCK_FILE}"
+    return 1
+  fi
+  if ! chmod 0600 "${MAIN2_LOCK_FILE}"; then
+    fail "无法设置 main2 进程锁权限：${MAIN2_LOCK_FILE}"
+    return 1
+  fi
+}
+
+run_main2_with_lock() {
+  local lock_status=0
+  if ! command -v flock >/dev/null 2>&1; then
+    fail "未找到 flock；请先安装 Debian/Ubuntu 基础包 util-linux。"
+    return 1
+  fi
+  prepare_main2_lock_file || return 1
+
+  # The quoted command is expanded by the supervised child Bash.
+  # shellcheck disable=SC2016
+  flock --exclusive --nonblock --close --conflict-exit-code 200 \
+    "${MAIN2_LOCK_FILE}" \
+    bash -c '
+      _main2_supervisor_exit() {
+        child_status=$?
+        trap - EXIT
+        if [[ "${child_status}" == "200" ]]; then
+          exit 199
+        fi
+        exit "${child_status}"
+      }
+      trap _main2_supervisor_exit EXIT
+      main2_script="$1"
+      shift
+      . "${main2_script}"
+      main2_locked_main "$@"
+    ' main2-lock "${BASH_SOURCE[0]}" "$@" || lock_status=$?
+  if [[ "${lock_status}" == "200" ]]; then
+    fail "检测到另一份 main2.sh 正在运行，本次执行未修改系统。"
+    return 1
+  fi
+  return "${lock_status}"
+}
+
 download_file() {
   local url="$1"
   local target="$2"
-  local tmp
-  tmp="$(mktemp)"
 
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "${url}" -o "${tmp}"
+    curl -fsSL "${url}" -o "${target}"
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "${tmp}" "${url}"
+    wget -qO "${target}" "${url}"
   else
     fail "未找到 curl 或 wget，无法下载配套脚本。"
-    rm -f "${tmp}"
-    exit 1
+    return 1
   fi
-
-  install -d "$(dirname "${target}")"
-  mv "${tmp}" "${target}"
-  chmod 0755 "${target}"
 }
 
-support_script_needs_refresh() {
+support_script_expected_sha256() {
   local path="$1"
   case "${path}" in
-    sysctl_optimization_debian_overwrite_main2.sh)
-      file_sha256_is \
-        "${SCRIPT_DIR}/${path}" \
-        de2c23dde96fffba81210c58b8533bae6ad195a7f46a745e6f99078da19dd181
+    sysctl_optimization_debian_overwrite_main2.sh) printf '%s' 832b9060a9d7153c74814ded4cbc4b35cc738998b1c2ac43f70de793736ee3ba ;;
+    scripts/swap.sh) printf '%s' 41c053c9a310fdb5de36832a5ee58fabee7e4e39e7ab5e60747b40e09f8bc28e ;;
+    scripts/ssh_root.sh) printf '%s' 8835074f48a8d5ebe50d7a723dccfd03245f245f44ea0fc73be2313d4440f9ae ;;
+    scripts/udp_multinic_main2.sh) printf '%s' 374d98155e6a26415418274663a291369017302693246101aa89eaf402d88b44 ;;
+    scripts/mtu_mss_main2.sh) printf '%s' b1b3b3e93aa4353572e1c1d4c20835a243884978f76aeca4eb6b5b7d0b5c14f6 ;;
+    *) return 1 ;;
+  esac
+}
+
+support_script_is_repository_version() {
+  local path="$1"
+  local actual="$2"
+  if [[ "${actual}" == "$(support_script_expected_sha256 "${path}")" ]]; then
+    return 0
+  fi
+  case "${path}:${actual}" in
+    sysctl_optimization_debian_overwrite_main2.sh:faaaf61b4756dd76548bdcd067653d3aed7a15f812680d13be8777e5f51dcfb9|\
+    sysctl_optimization_debian_overwrite_main2.sh:3c182e7aaf39971bb56d00a4e6625ee2e00c3e9d35235fea4f0e9f0488749d4e|\
+    sysctl_optimization_debian_overwrite_main2.sh:55171030719d1f3ca2a213d57425b1b35d62e6eb9754917335b3469895ba4c3f|\
+    sysctl_optimization_debian_overwrite_main2.sh:14ec6ab107edf0bae40cfb527fb598b59377f45352ed2f1f4a09e6e2901659cb|\
+    sysctl_optimization_debian_overwrite_main2.sh:c3603bfa2e2a8acacd9d03023136d3c74431fcc6ca872db400c817e50340bce3|\
+    sysctl_optimization_debian_overwrite_main2.sh:de2c23dde96fffba81210c58b8533bae6ad195a7f46a745e6f99078da19dd181|\
+    scripts/swap.sh:c66cb47b309abb443710d473b66380d14f9526ae1cd0d4e720a32a0dcbd49d60|\
+    scripts/swap.sh:f40e4ba1b881a3d6a44c4b1a68de515dd183a2a73e887e1eb399def9762fab65|\
+    scripts/swap.sh:bfab5c1ad70b404f6779f442cc4f953eade15979e337b28422ee2d806b1858d3|\
+    scripts/swap.sh:f431b364f3e9a7bbca7e8858575d2ced85fe3d98000313f5d2ae6a20312de131|\
+    scripts/ssh_root.sh:3cc5428c9cc4efe0ff2359375e96e9c36884e86c5fbf2469325f157b0618e553|\
+    scripts/ssh_root.sh:5a4ec0c5f6c1907c0f92af96a69a0a62473f32bb1667da1d5ceee0b01afd6aed|\
+    scripts/ssh_root.sh:f5e9f13a94acb111464995009996f17f00f356faeee12165835bf1a2f70be643|\
+    scripts/ssh_root.sh:5a92bdc5a47947fc573e282c2d7967a5ec5a352ed59b1d0c0685e19f411b1c3e)
+      return 0
       ;;
     *) return 1 ;;
   esac
 }
 
+remove_support_temporary_files() {
+  local temporary_file
+  for temporary_file in "$@"; do
+    [[ -n "${temporary_file}" ]] || continue
+    rm -f -- "${temporary_file}" || true
+  done
+}
+
 ensure_support_scripts() {
-  local path target url
-  for path in \
-    "sysctl_optimization_debian_overwrite_main2.sh" \
-    "scripts/swap.sh" \
-    "scripts/ssh_root.sh" \
-    "scripts/udp_multinic_main2.sh" \
-    "scripts/mtu_mss_main2.sh"; do
+  local path attempted_path target parent base expected actual url stage backup
+  local rollback_failed=0
+  local -a paths=(
+    "sysctl_optimization_debian_overwrite_main2.sh"
+    "scripts/swap.sh"
+    "scripts/ssh_root.sh"
+    "scripts/udp_multinic_main2.sh"
+    "scripts/mtu_mss_main2.sh"
+  )
+  local -a update_paths=()
+  local -A original_hash=()
+  local -A staged_file=()
+  local -A backup_file=()
+  local -A existed=()
+  local -a attempted_paths=()
+  local -a temporary_files=()
+
+  case "${AUTO_UPDATE_SUPPORT}" in
+    0|1) ;;
+    *) fail "AUTO_UPDATE_SUPPORT 必须是 0 或 1。"; return 1 ;;
+  esac
+  command -v sha256sum >/dev/null 2>&1 || {
+    fail "未找到 sha256sum，无法校验配套脚本。"
+    return 1
+  }
+
+  # Check every destination before downloading or replacing any file.
+  for path in "${paths[@]}"; do
     target="${SCRIPT_DIR}/${path}"
+    parent="$(dirname "${target}")"
+    if [[ -L "${parent}" || ( -e "${parent}" && ! -d "${parent}" ) ]]; then
+      fail "配套脚本目录不是安全的真实目录，已停止同步：${parent}"
+      return 1
+    fi
     if [[ -e "${target}" || -L "${target}" ]] &&
        [[ ! -f "${target}" || -L "${target}" ]]; then
       fail "配套脚本路径不是普通文件，已停止同步：${target}"
-      exit 1
+      return 1
     fi
-    if [[ "${AUTO_UPDATE_SUPPORT}" == "1" || ! -e "${target}" ]] ||
-       support_script_needs_refresh "${path}"; then
-      url="${RAW_BASE_URL}/${path}"
-      warn "正在同步 ${target} ..."
-      download_file "${url}" "${target}"
-      if support_script_needs_refresh "${path}"; then
-        fail "同步后仍是已知故障版本，已停止执行：${target}"
-        exit 1
-      fi
+    expected="$(support_script_expected_sha256 "${path}")"
+    if [[ ! -e "${target}" ]]; then
+      original_hash["${path}"]="missing"
+      update_paths+=("${path}")
+      continue
+    fi
+    actual="$(sha256sum -- "${target}" | awk '{print $1}')"
+    original_hash["${path}"]="${actual}"
+    if ! support_script_is_repository_version "${path}" "${actual}"; then
+      fail "检测到不属于本仓库历史版本的配套脚本，已停止全部同步：${target}"
+      return 1
+    fi
+    if [[ "${AUTO_UPDATE_SUPPORT}" == "1" || "${actual}" != "${expected}" ]]; then
+      update_paths+=("${path}")
     fi
   done
+
+  (( ${#update_paths[@]} > 0 )) || return 0
+
+  # Every staged file is created beside its target so the final rename stays
+  # atomic even when scripts/ is a separate mount point.
+  for path in "${update_paths[@]}"; do
+    target="${SCRIPT_DIR}/${path}"
+    parent="$(dirname "${target}")"
+    if ! install -d "${parent}" || [[ -L "${parent}" || ! -d "${parent}" ]]; then
+      remove_support_temporary_files "${temporary_files[@]}"
+      fail "无法创建安全的配套脚本目录，原文件均未修改：${parent}"
+      return 1
+    fi
+  done
+
+  for path in "${update_paths[@]}"; do
+    target="${SCRIPT_DIR}/${path}"
+    parent="$(dirname "${target}")"
+    base="$(basename "${target}")"
+    expected="$(support_script_expected_sha256 "${path}")"
+    url="${RAW_BASE_URL}/${path}"
+    if ! stage="$(mktemp "${parent}/.main2-support-new-${base}.XXXXXX")"; then
+      remove_support_temporary_files "${temporary_files[@]}"
+      fail "无法创建配套脚本临时文件，原文件均未修改：${parent}"
+      return 1
+    fi
+    temporary_files+=("${stage}")
+    warn "正在下载并校验 ${path} ..."
+    if ! download_file "${url}" "${stage}"; then
+      remove_support_temporary_files "${temporary_files[@]}"
+      fail "下载配套脚本失败，原文件均未修改：${url}"
+      return 1
+    fi
+    actual="$(sha256sum -- "${stage}" | awk '{print $1}')"
+    if [[ "${actual}" != "${expected}" ]] || ! bash -n "${stage}"; then
+      remove_support_temporary_files "${temporary_files[@]}"
+      fail "配套脚本校验失败，原文件均未修改：${path}"
+      return 1
+    fi
+    if ! chmod 0755 "${stage}"; then
+      remove_support_temporary_files "${temporary_files[@]}"
+      fail "无法设置配套脚本权限，原文件均未修改：${path}"
+      return 1
+    fi
+    staged_file["${path}"]="${stage}"
+  done
+
+  # Recheck destinations to prevent replacing a file changed during download.
+  for path in "${update_paths[@]}"; do
+    target="${SCRIPT_DIR}/${path}"
+    if [[ "${original_hash[${path}]}" == "missing" ]]; then
+      if [[ -e "${target}" || -L "${target}" ]]; then
+        remove_support_temporary_files "${temporary_files[@]}"
+        fail "同步期间目标路径发生变化，原文件均未修改：${target}"
+        return 1
+      fi
+    elif [[ ! -f "${target}" || -L "${target}" ]] ||
+         [[ "$(sha256sum -- "${target}" | awk '{print $1}')" != "${original_hash[${path}]}" ]]; then
+      remove_support_temporary_files "${temporary_files[@]}"
+      fail "同步期间目标文件发生变化，原文件均未修改：${target}"
+      return 1
+    fi
+  done
+
+  for path in "${update_paths[@]}"; do
+    target="${SCRIPT_DIR}/${path}"
+    parent="$(dirname "${target}")"
+    base="$(basename "${target}")"
+    if [[ -e "${target}" ]]; then
+      if ! backup="$(mktemp "${parent}/.main2-support-backup-${base}.XXXXXX")"; then
+        remove_support_temporary_files "${temporary_files[@]}"
+        fail "无法创建配套脚本备份文件，原文件均未修改：${parent}"
+        return 1
+      fi
+      temporary_files+=("${backup}")
+      if ! cp -a -- "${target}" "${backup}"; then
+        remove_support_temporary_files "${temporary_files[@]}"
+        fail "无法备份配套脚本，原文件均未修改：${target}"
+        return 1
+      fi
+      if [[ ! -f "${target}" || -L "${target}" ]] ||
+         [[ "$(sha256sum -- "${target}" | awk '{print $1}')" != "${original_hash[${path}]}" ]] ||
+         [[ "$(sha256sum -- "${backup}" | awk '{print $1}')" != "${original_hash[${path}]}" ]]; then
+        remove_support_temporary_files "${temporary_files[@]}"
+        fail "备份期间目标文件发生变化，原文件均未修改：${target}"
+        return 1
+      fi
+      existed["${path}"]=1
+      backup_file["${path}"]="${backup}"
+    else
+      existed["${path}"]=0
+    fi
+  done
+
+  for path in "${update_paths[@]}"; do
+    target="${SCRIPT_DIR}/${path}"
+    attempted_paths+=("${path}")
+    if mv -f -- "${staged_file[${path}]}" "${target}"; then
+      continue
+    fi
+
+    for attempted_path in "${attempted_paths[@]}"; do
+      target="${SCRIPT_DIR}/${attempted_path}"
+      actual=""
+      if [[ -f "${target}" && ! -L "${target}" ]]; then
+        actual="$(sha256sum -- "${target}" | awk '{print $1}')"
+      fi
+      if [[ "${existed[${attempted_path}]}" == "1" ]]; then
+        if [[ "${actual}" == "${original_hash[${attempted_path}]}" ]]; then
+          continue
+        fi
+        if [[ ( -e "${target}" || -L "${target}" ) &&
+              ( ! -f "${target}" || -L "${target}" ) ]]; then
+          rollback_failed=1
+        elif ! mv -f -- "${backup_file[${attempted_path}]}" "${target}"; then
+          rollback_failed=1
+        fi
+      else
+        if [[ ! -e "${target}" && ! -L "${target}" ]]; then
+          continue
+        fi
+        if [[ ! -f "${target}" || -L "${target}" ]]; then
+          rollback_failed=1
+        else
+          rm -f -- "${target}" || rollback_failed=1
+        fi
+      fi
+    done
+    remove_support_temporary_files "${temporary_files[@]}"
+    if [[ "${rollback_failed}" == "1" ]]; then
+      fail "配套脚本替换失败，且回滚未完整完成；请检查 ${SCRIPT_DIR}。"
+    else
+      fail "配套脚本替换失败，已恢复原文件。"
+    fi
+    return 1
+  done
+
+  remove_support_temporary_files "${temporary_files[@]}"
+  ok "main2 配套脚本已覆盖更新到版本 ${MAIN2_BUNDLE_VERSION}。"
 }
 
 require_root() {
@@ -111,6 +445,14 @@ require_supported_os() {
     debian|ubuntu) ;;
     *) fail "仅支持 Debian 或 Ubuntu 系统，当前系统 ID=${ID:-unknown}。"; exit 1 ;;
   esac
+}
+
+require_systemd() {
+  if [[ ! -d /run/systemd/system ]] ||
+     ! systemctl show --property=Version --value >/dev/null 2>&1; then
+    fail "main2 需要由 systemd 作为 PID 1 运行；不支持容器、chroot 或未启动 systemd 的环境。"
+    exit 1
+  fi
 }
 
 system_id() {
@@ -160,6 +502,25 @@ apt_update() {
     update
 }
 
+ensure_download_tool() {
+  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+    return 0
+  fi
+  command -v apt-get >/dev/null 2>&1 || {
+    fail "未找到 curl、wget 或 apt-get，无法自举下载配套脚本。"
+    exit 1
+  }
+
+  warn "未找到 curl/wget，正在安装 ca-certificates 和 curl ..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt_update
+  apt-get install -y --no-install-recommends ca-certificates curl
+  command -v curl >/dev/null 2>&1 || {
+    fail "curl 安装完成后仍不可用，已停止执行。"
+    exit 1
+  }
+}
+
 is_debian_official_source_file() {
   local file="$1"
 
@@ -193,11 +554,11 @@ disable_conflicting_debian_source_files() {
 }
 
 install_base_tools() {
-  require_supported_os
+  require_supported_os || return 1
   export DEBIAN_FRONTEND=noninteractive
-  apt_update
+  apt_update || return 1
   apt-get install -y --no-install-recommends \
-    ca-certificates curl wget gnupg lsb-release iproute2 ethtool procps gawk
+    ca-certificates curl wget gnupg lsb-release iproute2 ethtool procps gawk || return 1
   ok "基础组件安装完成。"
 }
 
@@ -245,7 +606,7 @@ EOF
 }
 
 set_system_sources() {
-  apt_update
+  apt_update || return 1
   ok "系统软件源已刷新，保留现有镜像与组件配置。"
 }
 
@@ -278,6 +639,24 @@ is_legacy_limits_file() {
   ' "${path}"
 }
 
+has_legacy_limits_prefix() {
+  local path="$1"
+  [[ -f "${path}" && ! -L "${path}" ]] || return 1
+  awk '
+    NR == 1 && NF == 4 && $1 == "*" && $2 == "soft" && $3 == "nproc" && $4 ~ /^[1-9][0-9]*$/ { limit = $4; next }
+    NR == 2 && NF == 4 && $1 == "*" && $2 == "hard" && $3 == "nproc" && $4 == limit { next }
+    NR == 3 && NF == 4 && $1 == "*" && $2 == "soft" && $3 == "nofile" && $4 == limit { next }
+    NR == 4 && NF == 4 && $1 == "*" && $2 == "hard" && $3 == "nofile" && $4 == limit { next }
+    NR == 5 && NF == 4 && $1 == "root" && $2 == "soft" && $3 == "nproc" && $4 == limit { next }
+    NR == 6 && NF == 4 && $1 == "root" && $2 == "hard" && $3 == "nproc" && $4 == limit { next }
+    NR == 7 && NF == 4 && $1 == "root" && $2 == "soft" && $3 == "nofile" && $4 == limit { next }
+    NR == 8 && NF == 4 && $1 == "root" && $2 == "hard" && $3 == "nofile" && $4 == limit { valid = 1; next }
+    NR > 8 { next }
+    { exit 1 }
+    END { if (NR < 8 || limit == "" || !valid) exit 1 }
+  ' "${path}"
+}
+
 restore_legacy_sysctl() {
   local target="/etc/sysctl.conf"
   local backup saved
@@ -285,8 +664,8 @@ restore_legacy_sysctl() {
     [[ "${LEGACY_BACKUP_ALREADY_RESTORED}" == "0" ]] || return 0
     backup="${target}.bak.${LEGACY_BACKUP_SUFFIX}"
     saved="${target}.pre-main2.$(date +%Y%m%d%H%M%S)"
-    cp -a "${target}" "${saved}"
-    cp -a "${backup}" "${target}"
+    cp -a "${target}" "${saved}" || return 1
+    cp -a "${backup}" "${target}" || return 1
     LEGACY_SYSCTL_RESTORED=1
     ok "已按明确指定的时间戳从 ${backup} 恢复 ${target}；原文件保存在 ${saved}。"
     return 0
@@ -295,29 +674,40 @@ restore_legacy_sysctl() {
   is_legacy_sysctl_file "${target}" || return 0
   LEGACY_SYSCTL_MIGRATION=1
   saved="${target}.pre-main2.$(date +%Y%m%d%H%M%S)"
-  cp -a "${target}" "${saved}"
+  cp -a "${target}" "${saved}" || return 1
   warn "检测到旧版覆盖的 ${target}；新版优化器将移除旧版管理键并保留其他现有内容。当前文件已备份为 ${saved}。"
 }
 
 restore_legacy_limits() {
   local target="/etc/security/limits.conf"
-  local backup saved
+  local backup saved tmp
   if [[ -n "${LEGACY_BACKUP_SUFFIX}" ]]; then
     [[ "${LEGACY_BACKUP_ALREADY_RESTORED}" == "0" ]] || return 0
     backup="${target}.bak.${LEGACY_BACKUP_SUFFIX}"
     saved="${target}.pre-main2.$(date +%Y%m%d%H%M%S)"
-    cp -a "${target}" "${saved}"
-    cp -a "${backup}" "${target}"
+    cp -a "${target}" "${saved}" || return 1
+    cp -a "${backup}" "${target}" || return 1
     ok "已按明确指定的时间戳从 ${backup} 恢复 ${target}；原文件保存在 ${saved}。"
     return 0
   fi
 
-  is_legacy_limits_file "${target}" || return 0
+  if ! is_legacy_limits_file "${target}"; then
+    [[ -f "${LEGACY_MARK_FILE}" && ! -L "${LEGACY_MARK_FILE}" ]] || return 0
+    has_legacy_limits_prefix "${target}" || return 0
+  fi
   saved="${target}.pre-main2.$(date +%Y%m%d%H%M%S)"
-  cp -a "${target}" "${saved}"
-  : > "${target}"
-  chmod 0644 "${target}"
-  warn "已移除精确匹配的旧版 8 行 limits 配置；未自动选择历史备份，旧版文件保存在 ${saved}。"
+  cp -a "${target}" "${saved}" || return 1
+  tmp="$(mktemp)" || return 1
+  if ! awk 'NR > 8 { print }' "${target}" > "${tmp}"; then
+    rm -f -- "${tmp}" || true
+    return 1
+  fi
+  if ! install -m 0644 "${tmp}" "${target}"; then
+    rm -f -- "${tmp}" || true
+    return 1
+  fi
+  rm -f -- "${tmp}" || return 1
+  warn "已移除精确匹配的旧版 8 行 limits 配置并保留后续自定义内容；未自动选择历史备份，旧版文件保存在 ${saved}。"
 }
 
 cleanup_owned_chain() {
@@ -344,6 +734,478 @@ file_sha256_is() {
   [[ "${actual}" == "${expected}" ]]
 }
 
+validate_stored_port_range() {
+  local value="$1"
+  local start end extra
+  [[ -n "${value}" ]] || return 0
+  read -r start end extra <<< "${value}"
+  [[ -z "${extra:-}" &&
+     "${start:-}" =~ ^(0|[1-9][0-9]{0,4})$ &&
+     "${end:-}" =~ ^(0|[1-9][0-9]{0,4})$ ]] || return 1
+  (( 10#${start} >= 1 && 10#${end} <= 65535 && 10#${start} < 10#${end} ))
+}
+
+validate_optional_positive_decimal() {
+  local value="$1"
+  [[ -z "${value}" || "${value}" =~ ^[1-9][0-9]{0,9}$ ]]
+}
+
+managed_network_fingerprint() {
+  local format="${1:-${MAIN2_MANAGED_CONFIG_FORMAT}}"
+  local path actual
+  local -a managed_paths=()
+  case "${format}" in
+    1)
+      managed_paths=(
+        /etc/modprobe.d/99-network-optimization.conf
+        /etc/modules-load.d/99-network-optimization.conf
+        /etc/security/limits.d/99-network-optimization.conf
+        /etc/systemd/system.conf.d/99-limits.conf
+        /etc/systemd/user.conf.d/99-limits.conf
+        /etc/profile.d/99-ulimit.sh
+        /etc/sysctl.d/99-network-optimization.conf
+        /etc/default/network-optimization-sysctl
+        /usr/local/sbin/network-optimization-sysctl.sh
+        /etc/systemd/system/network-optimization-sysctl.service
+        /etc/default/network-max-tune
+        /usr/local/sbin/network-max-tune.sh
+        /etc/systemd/system/network-max-tune.service
+      )
+      ;;
+    *) return 1 ;;
+  esac
+
+  {
+    for path in "${managed_paths[@]}"; do
+      printf '%s\0' "${path}"
+      if [[ ! -e "${path}" && ! -L "${path}" ]]; then
+        printf 'missing\0'
+      elif [[ -f "${path}" && ! -L "${path}" ]]; then
+        actual="$(sha256sum -- "${path}" | awk '{print $1}')" || return 1
+        [[ "${actual}" =~ ^[0-9a-f]{64}$ ]] || return 1
+        printf 'file\0%s\0' "${actual}"
+      else
+        return 1
+      fi
+    done
+  } | sha256sum | awk '{print $1}'
+}
+
+validate_install_state_values() {
+  local value
+  local -a performance_values=(
+    "${STORED_SOCKET_BUFFER_DEFAULT}"
+    "${STORED_SOCKET_BUFFER_MAX}"
+    "${STORED_NETDEV_MAX_BACKLOG}"
+    "${STORED_NETDEV_BUDGET}"
+    "${STORED_NETDEV_BUDGET_USECS}"
+    "${STORED_RPS_FLOW_ENTRIES}"
+    "${STORED_TXQUEUELEN}"
+    "${STORED_TCP_MAX_TW_BUCKETS}"
+    "${STORED_TCP_MAX_SYN_BACKLOG}"
+    "${STORED_IPFRAG_HIGH_THRESH}"
+    "${STORED_NOFILE_LIMIT}"
+    "${STORED_FILE_MAX}"
+    "${STORED_NF_CONNTRACK_MAX}"
+    "${STORED_NF_CONNTRACK_HASH_SIZE}"
+  )
+  [[ "${INSTALLED_BUNDLE_VERSION}" =~ ^(0|[1-9][0-9]{0,9})$ ]] || return 1
+  [[ "${INSTALLED_BUNDLE_MAIN2_SHA256}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "${APPLIED_MAIN2_VERSION}" =~ ^(0|[1-9][0-9]{0,9})$ ]] || return 1
+  [[ "${PENDING_MAIN2_VERSION}" =~ ^(0|[1-9][0-9]{0,9})$ ]] || return 1
+  case "${PENDING_REQUIRES_MANAGED_OVERWRITE}" in 0|1) ;; *) return 1 ;; esac
+  if [[ "${PENDING_MAIN2_VERSION}" == "0" ]]; then
+    [[ -z "${PENDING_MAIN2_SHA256}" &&
+       "${PENDING_REQUIRES_MANAGED_OVERWRITE}" == "0" ]] || return 1
+  else
+    [[ "${PENDING_MAIN2_SHA256}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  fi
+  if [[ "${APPLIED_MAIN2_VERSION}" == "0" ]]; then
+    [[ -z "${APPLIED_MAIN2_SHA256}" &&
+       -z "${STORED_MANAGED_CONFIG_FORMAT}" &&
+       -z "${STORED_MANAGED_CONFIG_SHA256}" ]] || return 1
+    if [[ "${PENDING_MAIN2_VERSION}" == "0" ]]; then
+      [[ -z "${STORED_PROFILE}" &&
+         -z "${STORED_ENABLE_NIC_TUNING}" && -z "${STORED_RP_FILTER}" &&
+         -z "${STORED_MAXIMIZE_NIC_RING}" && -z "${STORED_IP_LOCAL_PORT_RANGE}" ]] || return 1
+      for value in "${performance_values[@]}"; do
+        [[ -z "${value}" ]] || return 1
+      done
+      return
+    fi
+  else
+    [[ "${APPLIED_MAIN2_SHA256}" =~ ^[0-9a-f]{64}$ ]] || return 1
+    case "${STORED_MANAGED_CONFIG_FORMAT}" in 1) ;; *) return 1 ;; esac
+    [[ "${STORED_MANAGED_CONFIG_SHA256}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  fi
+  case "${STORED_PROFILE}" in balanced|max) ;; *) return 1 ;; esac
+  case "${STORED_ENABLE_NIC_TUNING}" in 0|1) ;; *) return 1 ;; esac
+  case "${STORED_RP_FILTER}" in 0|1|2) ;; *) return 1 ;; esac
+  case "${STORED_MAXIMIZE_NIC_RING}" in 0|1) ;; *) return 1 ;; esac
+  validate_stored_port_range "${STORED_IP_LOCAL_PORT_RANGE}" || return 1
+  for value in "${performance_values[@]}"; do
+    validate_optional_positive_decimal "${value}" || return 1
+  done
+  if [[ -n "${STORED_NETDEV_BUDGET_USECS}" ]] &&
+     (( 10#${STORED_NETDEV_BUDGET_USECS} > 2147483647 )); then
+    return 1
+  fi
+}
+
+write_install_state() {
+  local state_dir tmp
+  state_dir="$(dirname "${MAIN2_INSTALL_STATE_FILE}")"
+  if [[ -L "${state_dir}" || ( -e "${state_dir}" && ! -d "${state_dir}" ) ]]; then
+    fail "main2 状态目录不是安全的真实目录：${state_dir}"
+    return 1
+  fi
+  if [[ ( -e "${MAIN2_INSTALL_STATE_FILE}" || -L "${MAIN2_INSTALL_STATE_FILE}" ) &&
+        ( ! -f "${MAIN2_INSTALL_STATE_FILE}" || -L "${MAIN2_INSTALL_STATE_FILE}" ) ]]; then
+    fail "main2 安装状态不是普通文件：${MAIN2_INSTALL_STATE_FILE}"
+    return 1
+  fi
+  validate_install_state_values || {
+    fail "拒绝写入无效的 main2 安装状态。"
+    return 1
+  }
+
+  if ! install -d -m 0755 "${state_dir}"; then
+    fail "无法创建 main2 状态目录：${state_dir}"
+    return 1
+  fi
+  if ! tmp="$(mktemp "${state_dir}/.install-state.XXXXXX")"; then
+    fail "无法创建 main2 安装状态临时文件：${state_dir}"
+    return 1
+  fi
+  if ! cat > "${tmp}" <<EOF
+STATE_FORMAT=2
+BUNDLE_VERSION=${INSTALLED_BUNDLE_VERSION}
+BUNDLE_MAIN2_SHA256=${INSTALLED_BUNDLE_MAIN2_SHA256}
+APPLIED_VERSION=${APPLIED_MAIN2_VERSION}
+APPLIED_MAIN2_SHA256=${APPLIED_MAIN2_SHA256}
+PENDING_VERSION=${PENDING_MAIN2_VERSION}
+PENDING_MAIN2_SHA256=${PENDING_MAIN2_SHA256}
+PENDING_REQUIRES_MANAGED_OVERWRITE=${PENDING_REQUIRES_MANAGED_OVERWRITE}
+MANAGED_CONFIG_FORMAT=${STORED_MANAGED_CONFIG_FORMAT}
+MANAGED_CONFIG_SHA256=${STORED_MANAGED_CONFIG_SHA256}
+PROFILE=${STORED_PROFILE}
+ENABLE_NIC_TUNING=${STORED_ENABLE_NIC_TUNING}
+RP_FILTER=${STORED_RP_FILTER}
+MAXIMIZE_NIC_RING=${STORED_MAXIMIZE_NIC_RING}
+IP_LOCAL_PORT_RANGE=${STORED_IP_LOCAL_PORT_RANGE}
+SOCKET_BUFFER_DEFAULT=${STORED_SOCKET_BUFFER_DEFAULT}
+SOCKET_BUFFER_MAX=${STORED_SOCKET_BUFFER_MAX}
+NETDEV_MAX_BACKLOG=${STORED_NETDEV_MAX_BACKLOG}
+NETDEV_BUDGET=${STORED_NETDEV_BUDGET}
+NETDEV_BUDGET_USECS=${STORED_NETDEV_BUDGET_USECS}
+RPS_FLOW_ENTRIES=${STORED_RPS_FLOW_ENTRIES}
+TXQUEUELEN=${STORED_TXQUEUELEN}
+TCP_MAX_TW_BUCKETS=${STORED_TCP_MAX_TW_BUCKETS}
+TCP_MAX_SYN_BACKLOG=${STORED_TCP_MAX_SYN_BACKLOG}
+IPFRAG_HIGH_THRESH=${STORED_IPFRAG_HIGH_THRESH}
+NOFILE_LIMIT=${STORED_NOFILE_LIMIT}
+FILE_MAX=${STORED_FILE_MAX}
+NF_CONNTRACK_MAX=${STORED_NF_CONNTRACK_MAX}
+NF_CONNTRACK_HASH_SIZE=${STORED_NF_CONNTRACK_HASH_SIZE}
+EOF
+  then
+    rm -f -- "${tmp}" || true
+    fail "无法完整写入 main2 安装状态临时文件。"
+    return 1
+  fi
+  if ! chmod 0644 "${tmp}"; then
+    rm -f -- "${tmp}" || true
+    fail "无法设置 main2 安装状态临时文件权限。"
+    return 1
+  fi
+  if ! mv -f -- "${tmp}" "${MAIN2_INSTALL_STATE_FILE}"; then
+    rm -f -- "${tmp}" || true
+    fail "无法原子替换 main2 安装状态：${MAIN2_INSTALL_STATE_FILE}"
+    return 1
+  fi
+}
+
+restore_stored_settings() {
+  local mode="${1:-if-unset}"
+  case "${mode}" in
+    if-unset|force) ;;
+    *) fail "main2 状态恢复模式无效：${mode}"; return 1 ;;
+  esac
+  [[ "${mode}" != "force" && "${PROFILE_WAS_EXPLICIT}" == "1" ]] || PROFILE="${STORED_PROFILE}"
+  [[ "${mode}" != "force" && "${ENABLE_NIC_TUNING_WAS_EXPLICIT}" == "1" ]] || ENABLE_NIC_TUNING="${STORED_ENABLE_NIC_TUNING}"
+  [[ "${mode}" != "force" && "${RP_FILTER_WAS_EXPLICIT}" == "1" ]] || RP_FILTER="${STORED_RP_FILTER}"
+  [[ "${mode}" != "force" && "${MAXIMIZE_NIC_RING_WAS_EXPLICIT}" == "1" ]] || MAXIMIZE_NIC_RING="${STORED_MAXIMIZE_NIC_RING}"
+  [[ "${mode}" != "force" && "${IP_LOCAL_PORT_RANGE_WAS_EXPLICIT}" == "1" ]] || IP_LOCAL_PORT_RANGE="${STORED_IP_LOCAL_PORT_RANGE}"
+  [[ "${mode}" != "force" && "${SOCKET_BUFFER_DEFAULT_WAS_EXPLICIT}" == "1" ]] || SOCKET_BUFFER_DEFAULT="${STORED_SOCKET_BUFFER_DEFAULT}"
+  [[ "${mode}" != "force" && "${SOCKET_BUFFER_MAX_WAS_EXPLICIT}" == "1" ]] || SOCKET_BUFFER_MAX="${STORED_SOCKET_BUFFER_MAX}"
+  [[ "${mode}" != "force" && "${NETDEV_MAX_BACKLOG_WAS_EXPLICIT}" == "1" ]] || NETDEV_MAX_BACKLOG="${STORED_NETDEV_MAX_BACKLOG}"
+  [[ "${mode}" != "force" && "${NETDEV_BUDGET_WAS_EXPLICIT}" == "1" ]] || NETDEV_BUDGET="${STORED_NETDEV_BUDGET}"
+  [[ "${mode}" != "force" && "${NETDEV_BUDGET_USECS_WAS_EXPLICIT}" == "1" ]] || NETDEV_BUDGET_USECS="${STORED_NETDEV_BUDGET_USECS}"
+  [[ "${mode}" != "force" && "${RPS_FLOW_ENTRIES_WAS_EXPLICIT}" == "1" ]] || RPS_FLOW_ENTRIES="${STORED_RPS_FLOW_ENTRIES}"
+  [[ "${mode}" != "force" && "${TXQUEUELEN_WAS_EXPLICIT}" == "1" ]] || TXQUEUELEN="${STORED_TXQUEUELEN}"
+  [[ "${mode}" != "force" && "${TCP_MAX_TW_BUCKETS_WAS_EXPLICIT}" == "1" ]] || TCP_MAX_TW_BUCKETS="${STORED_TCP_MAX_TW_BUCKETS}"
+  [[ "${mode}" != "force" && "${TCP_MAX_SYN_BACKLOG_WAS_EXPLICIT}" == "1" ]] || TCP_MAX_SYN_BACKLOG="${STORED_TCP_MAX_SYN_BACKLOG}"
+  [[ "${mode}" != "force" && "${IPFRAG_HIGH_THRESH_WAS_EXPLICIT}" == "1" ]] || IPFRAG_HIGH_THRESH="${STORED_IPFRAG_HIGH_THRESH}"
+  [[ "${mode}" != "force" && "${NOFILE_LIMIT_WAS_EXPLICIT}" == "1" ]] || NOFILE_LIMIT="${STORED_NOFILE_LIMIT}"
+  [[ "${mode}" != "force" && "${FILE_MAX_WAS_EXPLICIT}" == "1" ]] || FILE_MAX="${STORED_FILE_MAX}"
+  [[ "${mode}" != "force" && "${NF_CONNTRACK_MAX_WAS_EXPLICIT}" == "1" ]] || NF_CONNTRACK_MAX="${STORED_NF_CONNTRACK_MAX}"
+  [[ "${mode}" != "force" && "${NF_CONNTRACK_HASH_SIZE_WAS_EXPLICIT}" == "1" ]] || NF_CONNTRACK_HASH_SIZE="${STORED_NF_CONNTRACK_HASH_SIZE}"
+}
+
+initialize_main2_state() {
+  local state_dir
+  local -a lines=()
+  [[ "${MAIN2_STATE_LOADED}" == "0" ]] || return 0
+  command -v sha256sum >/dev/null 2>&1 || {
+    fail "未找到 sha256sum，无法识别 main2 版本。"
+    return 1
+  }
+  CURRENT_MAIN2_SHA256="$(sha256sum -- "${BASH_SOURCE[0]}" | awk '{print $1}')"
+  [[ "${CURRENT_MAIN2_SHA256}" =~ ^[0-9a-f]{64}$ ]] || {
+    fail "无法读取当前 main2.sh 的 SHA256。"
+    return 1
+  }
+
+  state_dir="$(dirname "${MAIN2_INSTALL_STATE_FILE}")"
+  if [[ -L "${state_dir}" || ( -e "${state_dir}" && ! -d "${state_dir}" ) ]]; then
+    fail "main2 状态目录不是安全的真实目录：${state_dir}"
+    return 1
+  fi
+  if [[ ! -e "${MAIN2_INSTALL_STATE_FILE}" && ! -L "${MAIN2_INSTALL_STATE_FILE}" ]]; then
+    MAIN2_STATE_LOADED=1
+    return 0
+  fi
+  if [[ ! -f "${MAIN2_INSTALL_STATE_FILE}" || -L "${MAIN2_INSTALL_STATE_FILE}" ]]; then
+    fail "main2 安装状态不是普通文件：${MAIN2_INSTALL_STATE_FILE}"
+    return 1
+  fi
+
+  mapfile -t lines < "${MAIN2_INSTALL_STATE_FILE}"
+  if (( ${#lines[@]} < 7 )); then
+    fail "main2 安装状态格式无效：${MAIN2_INSTALL_STATE_FILE}"
+    return 1
+  fi
+  [[ "${lines[1]}" == BUNDLE_VERSION=* &&
+     "${lines[2]}" == BUNDLE_MAIN2_SHA256=* &&
+     "${lines[3]}" == APPLIED_VERSION=* &&
+     "${lines[4]}" == APPLIED_MAIN2_SHA256=* &&
+     "${lines[5]}" == PENDING_VERSION=* &&
+     "${lines[6]}" == PENDING_MAIN2_SHA256=* ]] || {
+    fail "main2 安装状态字段无效：${MAIN2_INSTALL_STATE_FILE}"
+    return 1
+  }
+  INSTALLED_BUNDLE_VERSION="${lines[1]#BUNDLE_VERSION=}"
+  INSTALLED_BUNDLE_MAIN2_SHA256="${lines[2]#BUNDLE_MAIN2_SHA256=}"
+  APPLIED_MAIN2_VERSION="${lines[3]#APPLIED_VERSION=}"
+  APPLIED_MAIN2_SHA256="${lines[4]#APPLIED_MAIN2_SHA256=}"
+  PENDING_MAIN2_VERSION="${lines[5]#PENDING_VERSION=}"
+  PENDING_MAIN2_SHA256="${lines[6]#PENDING_MAIN2_SHA256=}"
+  case "${lines[0]}" in
+    STATE_FORMAT=1)
+      if (( ${#lines[@]} != 28 )) ||
+         [[ "${lines[7]}" != MANAGED_CONFIG_FORMAT=* ||
+            "${lines[8]}" != MANAGED_CONFIG_SHA256=* ||
+            "${lines[9]}" != PROFILE=* ||
+            "${lines[10]}" != ENABLE_NIC_TUNING=* ||
+            "${lines[11]}" != RP_FILTER=* ||
+            "${lines[12]}" != MAXIMIZE_NIC_RING=* ||
+            "${lines[13]}" != IP_LOCAL_PORT_RANGE=* ||
+            "${lines[14]}" != SOCKET_BUFFER_DEFAULT=* ||
+            "${lines[15]}" != SOCKET_BUFFER_MAX=* ||
+            "${lines[16]}" != NETDEV_MAX_BACKLOG=* ||
+            "${lines[17]}" != NETDEV_BUDGET=* ||
+            "${lines[18]}" != NETDEV_BUDGET_USECS=* ||
+            "${lines[19]}" != RPS_FLOW_ENTRIES=* ||
+            "${lines[20]}" != TXQUEUELEN=* ||
+            "${lines[21]}" != TCP_MAX_TW_BUCKETS=* ||
+            "${lines[22]}" != TCP_MAX_SYN_BACKLOG=* ||
+            "${lines[23]}" != IPFRAG_HIGH_THRESH=* ||
+            "${lines[24]}" != NOFILE_LIMIT=* ||
+            "${lines[25]}" != FILE_MAX=* ||
+            "${lines[26]}" != NF_CONNTRACK_MAX=* ||
+            "${lines[27]}" != NF_CONNTRACK_HASH_SIZE=* ]]; then
+        fail "main2 安装状态字段无效：${MAIN2_INSTALL_STATE_FILE}"
+        return 1
+      fi
+      PENDING_REQUIRES_MANAGED_OVERWRITE=0
+      if [[ "${PENDING_MAIN2_VERSION}" == "0" ]]; then
+        PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN=1
+      else
+        PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN=0
+      fi
+      STORED_MANAGED_CONFIG_FORMAT="${lines[7]#MANAGED_CONFIG_FORMAT=}"
+      STORED_MANAGED_CONFIG_SHA256="${lines[8]#MANAGED_CONFIG_SHA256=}"
+      STORED_PROFILE="${lines[9]#PROFILE=}"
+      STORED_ENABLE_NIC_TUNING="${lines[10]#ENABLE_NIC_TUNING=}"
+      STORED_RP_FILTER="${lines[11]#RP_FILTER=}"
+      STORED_MAXIMIZE_NIC_RING="${lines[12]#MAXIMIZE_NIC_RING=}"
+      STORED_IP_LOCAL_PORT_RANGE="${lines[13]#IP_LOCAL_PORT_RANGE=}"
+      STORED_SOCKET_BUFFER_DEFAULT="${lines[14]#SOCKET_BUFFER_DEFAULT=}"
+      STORED_SOCKET_BUFFER_MAX="${lines[15]#SOCKET_BUFFER_MAX=}"
+      STORED_NETDEV_MAX_BACKLOG="${lines[16]#NETDEV_MAX_BACKLOG=}"
+      STORED_NETDEV_BUDGET="${lines[17]#NETDEV_BUDGET=}"
+      STORED_NETDEV_BUDGET_USECS="${lines[18]#NETDEV_BUDGET_USECS=}"
+      STORED_RPS_FLOW_ENTRIES="${lines[19]#RPS_FLOW_ENTRIES=}"
+      STORED_TXQUEUELEN="${lines[20]#TXQUEUELEN=}"
+      STORED_TCP_MAX_TW_BUCKETS="${lines[21]#TCP_MAX_TW_BUCKETS=}"
+      STORED_TCP_MAX_SYN_BACKLOG="${lines[22]#TCP_MAX_SYN_BACKLOG=}"
+      STORED_IPFRAG_HIGH_THRESH="${lines[23]#IPFRAG_HIGH_THRESH=}"
+      STORED_NOFILE_LIMIT="${lines[24]#NOFILE_LIMIT=}"
+      STORED_FILE_MAX="${lines[25]#FILE_MAX=}"
+      STORED_NF_CONNTRACK_MAX="${lines[26]#NF_CONNTRACK_MAX=}"
+      STORED_NF_CONNTRACK_HASH_SIZE="${lines[27]#NF_CONNTRACK_HASH_SIZE=}"
+      ;;
+    STATE_FORMAT=2)
+      if (( ${#lines[@]} != 29 )) ||
+         [[ "${lines[7]}" != PENDING_REQUIRES_MANAGED_OVERWRITE=* ||
+            "${lines[8]}" != MANAGED_CONFIG_FORMAT=* ||
+            "${lines[9]}" != MANAGED_CONFIG_SHA256=* ||
+            "${lines[10]}" != PROFILE=* ||
+            "${lines[11]}" != ENABLE_NIC_TUNING=* ||
+            "${lines[12]}" != RP_FILTER=* ||
+            "${lines[13]}" != MAXIMIZE_NIC_RING=* ||
+            "${lines[14]}" != IP_LOCAL_PORT_RANGE=* ||
+            "${lines[15]}" != SOCKET_BUFFER_DEFAULT=* ||
+            "${lines[16]}" != SOCKET_BUFFER_MAX=* ||
+            "${lines[17]}" != NETDEV_MAX_BACKLOG=* ||
+            "${lines[18]}" != NETDEV_BUDGET=* ||
+            "${lines[19]}" != NETDEV_BUDGET_USECS=* ||
+            "${lines[20]}" != RPS_FLOW_ENTRIES=* ||
+            "${lines[21]}" != TXQUEUELEN=* ||
+            "${lines[22]}" != TCP_MAX_TW_BUCKETS=* ||
+            "${lines[23]}" != TCP_MAX_SYN_BACKLOG=* ||
+            "${lines[24]}" != IPFRAG_HIGH_THRESH=* ||
+            "${lines[25]}" != NOFILE_LIMIT=* ||
+            "${lines[26]}" != FILE_MAX=* ||
+            "${lines[27]}" != NF_CONNTRACK_MAX=* ||
+            "${lines[28]}" != NF_CONNTRACK_HASH_SIZE=* ]]; then
+        fail "main2 安装状态字段无效：${MAIN2_INSTALL_STATE_FILE}"
+        return 1
+      fi
+      PENDING_REQUIRES_MANAGED_OVERWRITE="${lines[7]#PENDING_REQUIRES_MANAGED_OVERWRITE=}"
+      PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN=1
+      STORED_MANAGED_CONFIG_FORMAT="${lines[8]#MANAGED_CONFIG_FORMAT=}"
+      STORED_MANAGED_CONFIG_SHA256="${lines[9]#MANAGED_CONFIG_SHA256=}"
+      STORED_PROFILE="${lines[10]#PROFILE=}"
+      STORED_ENABLE_NIC_TUNING="${lines[11]#ENABLE_NIC_TUNING=}"
+      STORED_RP_FILTER="${lines[12]#RP_FILTER=}"
+      STORED_MAXIMIZE_NIC_RING="${lines[13]#MAXIMIZE_NIC_RING=}"
+      STORED_IP_LOCAL_PORT_RANGE="${lines[14]#IP_LOCAL_PORT_RANGE=}"
+      STORED_SOCKET_BUFFER_DEFAULT="${lines[15]#SOCKET_BUFFER_DEFAULT=}"
+      STORED_SOCKET_BUFFER_MAX="${lines[16]#SOCKET_BUFFER_MAX=}"
+      STORED_NETDEV_MAX_BACKLOG="${lines[17]#NETDEV_MAX_BACKLOG=}"
+      STORED_NETDEV_BUDGET="${lines[18]#NETDEV_BUDGET=}"
+      STORED_NETDEV_BUDGET_USECS="${lines[19]#NETDEV_BUDGET_USECS=}"
+      STORED_RPS_FLOW_ENTRIES="${lines[20]#RPS_FLOW_ENTRIES=}"
+      STORED_TXQUEUELEN="${lines[21]#TXQUEUELEN=}"
+      STORED_TCP_MAX_TW_BUCKETS="${lines[22]#TCP_MAX_TW_BUCKETS=}"
+      STORED_TCP_MAX_SYN_BACKLOG="${lines[23]#TCP_MAX_SYN_BACKLOG=}"
+      STORED_IPFRAG_HIGH_THRESH="${lines[24]#IPFRAG_HIGH_THRESH=}"
+      STORED_NOFILE_LIMIT="${lines[25]#NOFILE_LIMIT=}"
+      STORED_FILE_MAX="${lines[26]#FILE_MAX=}"
+      STORED_NF_CONNTRACK_MAX="${lines[27]#NF_CONNTRACK_MAX=}"
+      STORED_NF_CONNTRACK_HASH_SIZE="${lines[28]#NF_CONNTRACK_HASH_SIZE=}"
+      ;;
+    *)
+      fail "main2 安装状态格式无效：${MAIN2_INSTALL_STATE_FILE}"
+      return 1
+      ;;
+  esac
+  validate_install_state_values || {
+    fail "main2 安装状态内容无效：${MAIN2_INSTALL_STATE_FILE}"
+    return 1
+  }
+  if (( 10#${INSTALLED_BUNDLE_VERSION} > MAIN2_BUNDLE_VERSION ||
+        10#${APPLIED_MAIN2_VERSION} > MAIN2_BUNDLE_VERSION ||
+        10#${PENDING_MAIN2_VERSION} > MAIN2_BUNDLE_VERSION )); then
+    fail "当前 main2.sh 版本低于机器已记录版本，拒绝自动降级。"
+    return 1
+  fi
+
+  if [[ "${APPLIED_MAIN2_VERSION}" != "0" || "${PENDING_MAIN2_VERSION}" != "0" ]]; then
+    restore_stored_settings if-unset || return 1
+  fi
+  MAIN2_STATE_LOADED=1
+}
+
+record_bundle_state() {
+  initialize_main2_state || return 1
+  if [[ "${PENDING_MAIN2_VERSION}" != "0" &&
+        "${PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN}" != "1" ]]; then
+    return 0
+  fi
+  INSTALLED_BUNDLE_VERSION="${MAIN2_BUNDLE_VERSION}"
+  INSTALLED_BUNDLE_MAIN2_SHA256="${CURRENT_MAIN2_SHA256}"
+  write_install_state
+}
+
+store_requested_settings() {
+  local profile="$1"
+  STORED_PROFILE="${profile}"
+  STORED_ENABLE_NIC_TUNING="${ENABLE_NIC_TUNING:-1}"
+  STORED_RP_FILTER="${RP_FILTER:-0}"
+  STORED_MAXIMIZE_NIC_RING="${MAXIMIZE_NIC_RING:-0}"
+  STORED_IP_LOCAL_PORT_RANGE="${IP_LOCAL_PORT_RANGE:-}"
+  STORED_SOCKET_BUFFER_DEFAULT="${SOCKET_BUFFER_DEFAULT:-}"
+  STORED_SOCKET_BUFFER_MAX="${SOCKET_BUFFER_MAX:-}"
+  STORED_NETDEV_MAX_BACKLOG="${NETDEV_MAX_BACKLOG:-}"
+  STORED_NETDEV_BUDGET="${NETDEV_BUDGET:-}"
+  STORED_NETDEV_BUDGET_USECS="${NETDEV_BUDGET_USECS:-}"
+  STORED_RPS_FLOW_ENTRIES="${RPS_FLOW_ENTRIES:-}"
+  STORED_TXQUEUELEN="${TXQUEUELEN:-}"
+  STORED_TCP_MAX_TW_BUCKETS="${TCP_MAX_TW_BUCKETS:-}"
+  STORED_TCP_MAX_SYN_BACKLOG="${TCP_MAX_SYN_BACKLOG:-}"
+  STORED_IPFRAG_HIGH_THRESH="${IPFRAG_HIGH_THRESH:-}"
+  STORED_NOFILE_LIMIT="${NOFILE_LIMIT:-}"
+  STORED_FILE_MAX="${FILE_MAX:-}"
+  STORED_NF_CONNTRACK_MAX="${NF_CONNTRACK_MAX:-}"
+  STORED_NF_CONNTRACK_HASH_SIZE="${NF_CONNTRACK_HASH_SIZE:-}"
+}
+
+begin_applied_update() {
+  local profile="$1"
+  local requires_managed_overwrite="$2"
+  case "${requires_managed_overwrite}" in
+    0|1) ;;
+    *) fail "受管文件覆盖事务参数必须是 0 或 1。"; return 1 ;;
+  esac
+  initialize_main2_state || return 1
+  INSTALLED_BUNDLE_VERSION="${MAIN2_BUNDLE_VERSION}"
+  INSTALLED_BUNDLE_MAIN2_SHA256="${CURRENT_MAIN2_SHA256}"
+  PENDING_MAIN2_VERSION="${MAIN2_BUNDLE_VERSION}"
+  PENDING_MAIN2_SHA256="${CURRENT_MAIN2_SHA256}"
+  PENDING_REQUIRES_MANAGED_OVERWRITE="${requires_managed_overwrite}"
+  PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN=1
+  store_requested_settings "${profile}"
+  write_install_state
+}
+
+record_applied_state() {
+  local profile="$1"
+  local managed_config_sha256
+  initialize_main2_state || return 1
+  managed_config_sha256="$(managed_network_fingerprint "${MAIN2_MANAGED_CONFIG_FORMAT}")" || {
+    fail "无法计算 main2 管理配置的 SHA256，安装状态未更新。"
+    return 1
+  }
+  [[ "${managed_config_sha256}" =~ ^[0-9a-f]{64}$ ]] || {
+    fail "main2 管理配置 SHA256 无效，安装状态未更新。"
+    return 1
+  }
+  INSTALLED_BUNDLE_VERSION="${MAIN2_BUNDLE_VERSION}"
+  INSTALLED_BUNDLE_MAIN2_SHA256="${CURRENT_MAIN2_SHA256}"
+  APPLIED_MAIN2_VERSION="${MAIN2_BUNDLE_VERSION}"
+  APPLIED_MAIN2_SHA256="${CURRENT_MAIN2_SHA256}"
+  PENDING_MAIN2_VERSION=0
+  PENDING_MAIN2_SHA256=""
+  PENDING_REQUIRES_MANAGED_OVERWRITE=0
+  PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN=1
+  STORED_MANAGED_CONFIG_FORMAT="${MAIN2_MANAGED_CONFIG_FORMAT}"
+  STORED_MANAGED_CONFIG_SHA256="${managed_config_sha256}"
+  store_requested_settings "${profile}"
+  write_install_state
+}
+
 legacy_backup_state_file() {
   printf '%s/legacy-backup-%s.restored' "${LEGACY_RESTORE_STATE_DIR}" "${LEGACY_BACKUP_SUFFIX}"
 }
@@ -353,10 +1215,10 @@ mark_legacy_backup_restored() {
   if [[ -z "${LEGACY_BACKUP_SUFFIX}" || "${LEGACY_BACKUP_ALREADY_RESTORED}" == "1" ]]; then
     return 0
   fi
-  install -d -m 0755 "${LEGACY_RESTORE_STATE_DIR}"
+  install -d -m 0755 "${LEGACY_RESTORE_STATE_DIR}" || return 1
   state_file="$(legacy_backup_state_file)"
-  touch "${state_file}"
-  chmod 0644 "${state_file}"
+  touch "${state_file}" || return 1
+  chmod 0644 "${state_file}" || return 1
   ok "已记录旧备份时间戳 ${LEGACY_BACKUP_SUFFIX} 的一次性恢复状态。"
 }
 
@@ -393,7 +1255,7 @@ cleanup_legacy_mss() {
     /etc/default/mtu-mss-fix \
     /usr/local/sbin/mtu-mss-apply.sh \
     /etc/systemd/system/mtu-mss-fix.service \
-    /etc/systemd/system/multi-user.target.wants/mtu-mss-fix.service
+    /etc/systemd/system/multi-user.target.wants/mtu-mss-fix.service || return 1
   ok "已清理旧版 main.sh 默认启用的 MTU/MSS 服务和规则。"
 }
 
@@ -420,7 +1282,7 @@ cleanup_legacy_network_tune() {
     /etc/default/network-max-tune \
     /usr/local/sbin/network-max-tune.sh \
     /etc/systemd/system/network-max-tune.service \
-    /etc/systemd/system/multi-user.target.wants/network-max-tune.service
+    /etc/systemd/system/multi-user.target.wants/network-max-tune.service || return 1
   ok "已停用旧版网卡调优服务，后续由 main2 新服务接管。"
 }
 
@@ -436,6 +1298,17 @@ detect_legacy_udp() {
     return 0
   fi
   return 1
+}
+
+udp_runtime_is_current_main2() {
+  file_sha256_is /usr/local/sbin/udp-multinic-apply.sh 4f094911fe1e2d4e0a528e17e0cc50e46045b76cb0e8bd563b0742d1ec7c054f &&
+    file_sha256_is /etc/systemd/system/udp-multinic.service d4eaeadd2f155b831c44a65aba43297ad6eaa15c3b530be73afba65c823cc7a4 &&
+    file_sha256_is /etc/sysctl.d/61-udp-multinic.conf eac3e15d92ea1b5c6b07ba242cba835d146d412832f920aa3d89f7e680c135db
+}
+
+udp_rules_need_runtime_recovery() {
+  [[ -s /etc/udp-multinic/rules.conf && ! -L /etc/udp-multinic/rules.conf ]] || return 1
+  ! udp_runtime_is_current_main2
 }
 
 preflight_udp_runtime_paths() {
@@ -477,6 +1350,11 @@ preflight_udp_runtime_paths() {
 
 preflight_legacy_main_deployment() {
   local backup link_target state_file
+  if [[ ( -e "${LEGACY_MARK_FILE}" || -L "${LEGACY_MARK_FILE}" ) &&
+        ( ! -f "${LEGACY_MARK_FILE}" || -L "${LEGACY_MARK_FILE}" ) ]]; then
+    fail "旧版 main.sh 初始化标记不是普通文件：${LEGACY_MARK_FILE}"
+    return 1
+  fi
   if [[ -L /etc/udp-multinic || ( -e /etc/udp-multinic && ! -d /etc/udp-multinic ) ]]; then
     fail "UDP 配置路径不是安全的真实目录：/etc/udp-multinic"
     return 1
@@ -499,7 +1377,13 @@ preflight_legacy_main_deployment() {
     fail "UDP 规则路径不是普通文件：/etc/udp-multinic/rules.conf"
     return 1
   fi
-  preflight_udp_runtime_paths
+  preflight_udp_runtime_paths || return 1
+  if [[ -f /etc/udp-multinic/rules.conf ]]; then
+    if ! bash "${UDP_MULTINIC_SCRIPT}" validate; then
+      fail "UDP 规则未通过 main2 IPv4 迁移校验，系统配置尚未修改。"
+      return 1
+    fi
+  fi
 
   if [[ -z "${LEGACY_BACKUP_SUFFIX}" ]]; then
     return 0
@@ -559,31 +1443,29 @@ prepare_legacy_main_deployment() {
   LEGACY_SYSCTL_MIGRATION=0
   LEGACY_SYSCTL_RESTORED=0
   LEGACY_BACKUP_ALREADY_RESTORED=0
-  preflight_legacy_main_deployment
-  restore_legacy_sysctl
-  restore_legacy_limits
-  mark_legacy_backup_restored
-  cleanup_legacy_mss
-  cleanup_legacy_network_tune
+  preflight_legacy_main_deployment || return 1
+  restore_legacy_sysctl || return 1
+  restore_legacy_limits || return 1
+  mark_legacy_backup_restored || return 1
+  cleanup_legacy_mss || return 1
+  cleanup_legacy_network_tune || return 1
 
-  if detect_legacy_udp; then
-    chmod +x "${UDP_MULTINIC_SCRIPT}"
-    bash "${UDP_MULTINIC_SCRIPT}" validate
+  if detect_legacy_udp || udp_rules_need_runtime_recovery; then
+    chmod +x "${UDP_MULTINIC_SCRIPT}" || return 1
     systemctl disable --now udp-multinic.service 2>/dev/null || true
-    install -d -m 0755 "$(dirname "${LEGACY_UDP_PENDING_FILE}")"
-    touch "${LEGACY_UDP_PENDING_FILE}"
-    chmod 0644 "${LEGACY_UDP_PENDING_FILE}"
-    ok "已停用旧版 UDP 映射服务，现有映射将在新网络配置应用后升级。"
+    install -d -m 0755 "$(dirname "${LEGACY_UDP_PENDING_FILE}")" || return 1
+    touch "${LEGACY_UDP_PENDING_FILE}" || return 1
+    chmod 0644 "${LEGACY_UDP_PENDING_FILE}" || return 1
+    ok "已停用旧版或残缺的 UDP 映射服务，现有 IPv4 规则将在新网络配置应用后升级。"
   elif [[ -f "${LEGACY_UDP_PENDING_FILE}" && ! -L "${LEGACY_UDP_PENDING_FILE}" ]]; then
-    chmod +x "${UDP_MULTINIC_SCRIPT}"
-    bash "${UDP_MULTINIC_SCRIPT}" validate
+    bash "${UDP_MULTINIC_SCRIPT}" validate || return 1
   fi
   if [[ -f "${LEGACY_UDP_PENDING_FILE}" && ! -L "${LEGACY_UDP_PENDING_FILE}" ]]; then
     LEGACY_UDP_MIGRATION=1
   fi
 
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload
+    systemctl daemon-reload || return 1
     systemctl reset-failed network-max-tune.service mtu-mss-fix.service udp-multinic.service 2>/dev/null || true
   fi
 }
@@ -592,33 +1474,72 @@ migrate_legacy_udp() {
   if [[ "${LEGACY_UDP_MIGRATION}" != "1" && ! -f "${LEGACY_UDP_PENDING_FILE}" ]]; then
     return 0
   fi
-  chmod +x "${UDP_MULTINIC_SCRIPT}"
-  bash "${UDP_MULTINIC_SCRIPT}" migrate
-  rm -f "${LEGACY_UDP_PENDING_FILE}"
+  chmod +x "${UDP_MULTINIC_SCRIPT}" || return 1
+  bash "${UDP_MULTINIC_SCRIPT}" migrate || return 1
+  rm -f "${LEGACY_UDP_PENDING_FILE}" || return 1
   rmdir "$(dirname "${LEGACY_UDP_PENDING_FILE}")" 2>/dev/null || true
 }
 
 run_network_optimization() {
   local profile="$1"
-  local port_range
+  local save_applied_state="${2:-1}"
+  local allow_managed_overwrite="${3:-${ALLOW_MANAGED_CONFIG_OVERWRITE:-0}}"
+  local port_range enable_nic_tuning rp_filter maximize_nic_ring
+  local -a optimizer_env
+  case "${save_applied_state}" in
+    0|1) ;;
+    *) fail "run_network_optimization 的状态记录参数必须是 0 或 1。"; return 1 ;;
+  esac
+  case "${allow_managed_overwrite}" in
+    0|1) ;;
+    *) fail "ALLOW_MANAGED_CONFIG_OVERWRITE 必须是 0 或 1。"; return 1 ;;
+  esac
   if [[ ! -f "${OPTIMIZER}" ]]; then
     fail "未找到 ${OPTIMIZER}"
     exit 1
   fi
 
   port_range="${IP_LOCAL_PORT_RANGE:-}"
-  if [[ -n "${port_range}" ]]; then
-    PROFILE="${profile}" IP_LOCAL_PORT_RANGE="${port_range}" VALIDATE_ONLY=1 bash "${OPTIMIZER}"
-  else
-    PROFILE="${profile}" VALIDATE_ONLY=1 bash "${OPTIMIZER}"
+  enable_nic_tuning="${ENABLE_NIC_TUNING:-1}"
+  rp_filter="${RP_FILTER:-0}"
+  maximize_nic_ring="${MAXIMIZE_NIC_RING:-0}"
+  optimizer_env=(
+    "PROFILE=${profile}"
+    "IP_LOCAL_PORT_RANGE=${port_range}"
+    "ENABLE_NIC_TUNING=${enable_nic_tuning}"
+    "RP_FILTER=${rp_filter}"
+    "MAXIMIZE_NIC_RING=${maximize_nic_ring}"
+    "ALLOW_MANAGED_CONFIG_OVERWRITE=${allow_managed_overwrite}"
+    "SOCKET_BUFFER_DEFAULT=${SOCKET_BUFFER_DEFAULT:-}"
+    "SOCKET_BUFFER_MAX=${SOCKET_BUFFER_MAX:-}"
+    "NETDEV_MAX_BACKLOG=${NETDEV_MAX_BACKLOG:-}"
+    "NETDEV_BUDGET=${NETDEV_BUDGET:-}"
+    "NETDEV_BUDGET_USECS=${NETDEV_BUDGET_USECS:-}"
+    "RPS_FLOW_ENTRIES=${RPS_FLOW_ENTRIES:-}"
+    "TXQUEUELEN=${TXQUEUELEN:-}"
+    "TCP_MAX_TW_BUCKETS=${TCP_MAX_TW_BUCKETS:-}"
+    "TCP_MAX_SYN_BACKLOG=${TCP_MAX_SYN_BACKLOG:-}"
+    "IPFRAG_HIGH_THRESH=${IPFRAG_HIGH_THRESH:-}"
+    "NOFILE_LIMIT=${NOFILE_LIMIT:-}"
+    "FILE_MAX=${FILE_MAX:-}"
+    "NF_CONNTRACK_MAX=${NF_CONNTRACK_MAX:-}"
+    "NF_CONNTRACK_HASH_SIZE=${NF_CONNTRACK_HASH_SIZE:-}"
+  )
+  if ! env "${optimizer_env[@]}" VALIDATE_ONLY=1 bash "${OPTIMIZER}"; then
+    fail "网络优化参数或受管文件校验失败，系统配置尚未应用。"
+    return 1
   fi
+  begin_applied_update "${profile}" "${allow_managed_overwrite}" || return 1
 
-  prepare_legacy_main_deployment
-  chmod +x "${OPTIMIZER}"
-  if [[ -n "${port_range}" ]]; then
-    PROFILE="${profile}" IP_LOCAL_PORT_RANGE="${port_range}" VALIDATE_ONLY=0 bash "${OPTIMIZER}"
-  else
-    PROFILE="${profile}" VALIDATE_ONLY=0 bash "${OPTIMIZER}"
+  prepare_legacy_main_deployment || return 1
+  chmod +x "${OPTIMIZER}" || return 1
+  if ! env "${optimizer_env[@]}" VALIDATE_ONLY=0 bash "${OPTIMIZER}"; then
+    if [[ "${PENDING_REQUIRES_MANAGED_OVERWRITE}" == "1" ]]; then
+      fail "网络优化应用失败；已保留进行中状态。重试时必须再次明确执行 ALLOW_MANAGED_CONFIG_OVERWRITE=1 bash main2.sh。"
+    else
+      fail "网络优化应用失败；已保留进行中状态，下次运行将按上次记录参数继续重试。"
+    fi
+    return 1
   fi
   if [[ "${LEGACY_SYSCTL_MIGRATION}" == "1" && -z "${port_range}" ]]; then
     warn "旧版临时端口范围已停止持久化；当前运行值会持续到本次重启，main2 不会自行填入未知的部署前数值。"
@@ -626,8 +1547,13 @@ run_network_optimization() {
   if [[ "${LEGACY_SYSCTL_RESTORED}" == "1" ]]; then
     warn "指定备份中的非 main2 运行参数将在重启后按系统加载顺序生效。"
   fi
-  migrate_legacy_udp
-  touch "${MARK_FILE}"
+  migrate_legacy_udp || return 1
+  ENABLE_NIC_TUNING="${enable_nic_tuning}"
+  RP_FILTER="${rp_filter}"
+  MAXIMIZE_NIC_RING="${maximize_nic_ring}"
+  if [[ "${save_applied_state}" == "1" ]]; then
+    record_applied_state "${profile}" || return 1
+  fi
   ok "网络优化完成。建议重启一次。"
 }
 
@@ -643,35 +1569,149 @@ run_local_script() {
 
 install_irqbalance() {
   export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y irqbalance
-  systemctl start irqbalance
-  systemctl enable irqbalance
+  apt-get install -y irqbalance || return 1
+  systemctl start irqbalance || return 1
+  systemctl enable irqbalance || return 1
   ok "irqbalance 已安装并启用。"
 }
 
 install_chrony() {
   export DEBIAN_FRONTEND=noninteractive
-  apt update
-  apt install chrony -y
-  systemctl enable chrony
-  systemctl restart chrony
-  chronyc makestep
+  apt update || return 1
+  apt install chrony -y || return 1
+  systemctl enable chrony || return 1
+  systemctl restart chrony || return 1
+  chronyc makestep || return 1
   ok "Chrony 已安装、启用并完成立即校时。"
 }
 
 default_setup() {
-  if [[ "${SKIP_INIT:-0}" == "1" ]]; then
+  local skip_init="${SKIP_INIT:-0}"
+  local reapply_init="${REAPPLY_INIT:-0}"
+  local allow_managed_overwrite="${ALLOW_MANAGED_CONFIG_OVERWRITE:-0}"
+  local profile current_managed_config_sha256
+  local resume_pending=0
+
+  initialize_main2_state || return 1
+
+  case "${skip_init}" in
+    0|1) ;;
+    *) fail "SKIP_INIT 必须是 0 或 1。"; return 1 ;;
+  esac
+  case "${reapply_init}" in
+    0|1) ;;
+    *) fail "REAPPLY_INIT 必须是 0 或 1。"; return 1 ;;
+  esac
+  case "${allow_managed_overwrite}" in
+    0|1) ;;
+    *) fail "ALLOW_MANAGED_CONFIG_OVERWRITE 必须是 0 或 1。"; return 1 ;;
+  esac
+  if [[ ( -e "${MARK_FILE}" || -L "${MARK_FILE}" ) &&
+        ( ! -f "${MARK_FILE}" || -L "${MARK_FILE}" ) ]]; then
+    fail "main2 初始化标记不是普通文件：${MARK_FILE}"
+    return 1
+  fi
+  if [[ "${skip_init}" == "1" ]]; then
     ok "已跳过默认初始化。"
     return 0
   fi
+  if [[ "${PROFILE_WAS_EXPLICIT}" == "1" ]]; then
+    case "${PROFILE}" in
+      balanced|max) ;;
+      *) fail "PROFILE 已明确设置时必须精确为 balanced 或 max。"; return 1 ;;
+    esac
+  fi
+  if [[ "${PENDING_MAIN2_VERSION}" != "0" && "${allow_managed_overwrite}" != "1" ]]; then
+    if [[ "${PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN}" != "1" ]]; then
+      warn "旧状态未记录上次未完成事务的人工文件覆盖条件，本次未获得重新覆盖授权。"
+      warn "处理该事务时，请明确执行 ALLOW_MANAGED_CONFIG_OVERWRITE=1 REAPPLY_INIT=1 PROFILE=${STORED_PROFILE} bash main2.sh。"
+      return 0
+    fi
+    if [[ "${PENDING_REQUIRES_MANAGED_OVERWRITE}" == "1" ]]; then
+      warn "上次未完成事务包含人工同名普通文件覆盖，本次尚未重新获得覆盖授权。"
+      warn "继续或重开该事务时，必须再次执行 ALLOW_MANAGED_CONFIG_OVERWRITE=1 bash main2.sh。"
+      return 0
+    fi
+  fi
+  if [[ -f "${MARK_FILE}" && "${APPLIED_MAIN2_VERSION}" == "0" &&
+        "${PENDING_MAIN2_VERSION}" == "0" ]]; then
+    if [[ "${PROFILE_WAS_EXPLICIT}" == "0" && "${reapply_init}" == "0" ]]; then
+      warn "已覆盖更新 main2 脚本包；旧 main2 没有记录 balanced/max，现有系统参数保持不变。"
+      warn "请在菜单明确执行 balanced 或 max，之后的 main2 更新将按该档位自动覆盖应用。"
+      return 0
+    fi
+    case "${PROFILE:-}" in
+      balanced|max) ;;
+      *) fail "旧 main2 没有档位记录；重应用时必须同时明确 PROFILE=balanced 或 PROFILE=max。"; return 1 ;;
+    esac
+  fi
+  if [[ -f "${MARK_FILE}" && "${reapply_init}" == "0" &&
+        "${PENDING_MAIN2_VERSION}" == "0" &&
+        "${APPLIED_MAIN2_VERSION}" == "${MAIN2_BUNDLE_VERSION}" &&
+        "${APPLIED_MAIN2_SHA256}" == "${CURRENT_MAIN2_SHA256}" ]]; then
+    ok "当前 main2 版本已应用，本次保留现有配置并直接进入菜单。"
+    return 0
+  fi
+  if [[ "${PENDING_MAIN2_VERSION}" != "0" && "${reapply_init}" == "0" ]]; then
+    if [[ "${PENDING_MAIN2_VERSION}" == "${MAIN2_BUNDLE_VERSION}" &&
+          "${PENDING_MAIN2_SHA256}" == "${CURRENT_MAIN2_SHA256}" ]]; then
+      if [[ "${PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN}" != "1" ]]; then
+        warn "旧状态无法确认上次未完成应用是否获得过人工文件覆盖授权，本次未自动续跑。"
+        warn "确认覆盖后，请明确执行 ALLOW_MANAGED_CONFIG_OVERWRITE=1 REAPPLY_INIT=1 PROFILE=${STORED_PROFILE} bash main2.sh。"
+        return 0
+      fi
+      restore_stored_settings force || return 1
+      if [[ "${PENDING_REQUIRES_MANAGED_OVERWRITE}" == "1" &&
+            "${allow_managed_overwrite}" != "1" ]]; then
+        warn "上次未完成应用包含人工同名普通文件覆盖，本次尚未重新获得覆盖授权。"
+        warn "继续同一事务时，请明确执行 ALLOW_MANAGED_CONFIG_OVERWRITE=1 bash main2.sh。"
+        return 0
+      fi
+      resume_pending=1
+      warn "检测到同一 main2 版本上次应用未完成，将按上次记录参数继续重试。"
+    else
+      warn "检测到其他 main2 版本留下的未完成应用，现有系统配置未自动覆盖。"
+      if [[ "${PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN}" != "1" ||
+            "${PENDING_REQUIRES_MANAGED_OVERWRITE}" == "1" ]]; then
+        warn "确认覆盖后，请明确执行 ALLOW_MANAGED_CONFIG_OVERWRITE=1 REAPPLY_INIT=1 PROFILE=${STORED_PROFILE} bash main2.sh。"
+      else
+        warn "确认继续后，请明确执行 REAPPLY_INIT=1 PROFILE=${STORED_PROFILE} bash main2.sh。"
+      fi
+      return 0
+    fi
+  fi
+  if [[ "${APPLIED_MAIN2_VERSION}" != "0" && "${reapply_init}" == "0" &&
+        "${resume_pending}" == "0" ]]; then
+    if ! current_managed_config_sha256="$(managed_network_fingerprint "${STORED_MANAGED_CONFIG_FORMAT}")" ||
+       [[ "${current_managed_config_sha256}" != "${STORED_MANAGED_CONFIG_SHA256}" ]]; then
+      warn "检测到 main2 管理配置已被修改，脚本包已更新，但现有系统配置未覆盖。"
+      warn "确认允许覆盖普通文件后，请明确执行 ALLOW_MANAGED_CONFIG_OVERWRITE=1 REAPPLY_INIT=1 PROFILE=balanced bash main2.sh 或对应的 PROFILE=max 命令。"
+      return 0
+    fi
+  fi
+  if [[ "${resume_pending}" == "1" ]]; then
+    :
+  elif [[ -f "${MARK_FILE}" && "${reapply_init}" == "0" ]]; then
+    warn "检测到 main2 新版本，将按已记录配置覆盖更新系统优化。"
+  elif [[ "${APPLIED_MAIN2_VERSION}" != "0" && "${reapply_init}" == "0" ]]; then
+    warn "检测到网络优化已记录但默认初始化未完成，将按已记录配置补齐默认初始化。"
+  fi
 
+  profile="${PROFILE:-balanced}"
   warn "开始默认初始化：刷新系统软件源 -> 安装并校准 Chrony -> 关闭 IPv6 -> 执行用户态 TCP/UDP 代理优化 -> 安装并启用 irqbalance。"
-  set_system_sources
-  install_base_tools
-  install_chrony
-  run_network_optimization "${PROFILE:-balanced}"
-  install_irqbalance
-  touch "${MARK_FILE}"
+  set_system_sources || return 1
+  install_base_tools || return 1
+  install_chrony || return 1
+  if ! install_irqbalance; then
+    fail "irqbalance 安装或启用失败，本次 main2 版本尚未标记为已完成。"
+    return 1
+  fi
+  run_network_optimization "${profile}" 0 "${allow_managed_overwrite}" || return 1
+  record_applied_state "${profile}" || return 1
+  if ! touch "${MARK_FILE}"; then
+    fail "无法写入 main2 初始化标记：${MARK_FILE}"
+    return 1
+  fi
   ok "默认初始化完成。"
 }
 
@@ -803,8 +1843,22 @@ main_menu() {
   done
 }
 
-require_root
-require_supported_os
-ensure_support_scripts
-default_setup
-main_menu
+main2_locked_main() {
+  ensure_download_tool
+  initialize_main2_state
+  ensure_support_scripts
+  record_bundle_state
+  default_setup
+  main_menu
+}
+
+main2_main() {
+  require_root
+  require_supported_os
+  require_systemd
+  run_main2_with_lock "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main2_main "$@"
+fi

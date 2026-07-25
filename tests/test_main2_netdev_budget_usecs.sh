@@ -33,6 +33,10 @@ assert_not_contains() {
   fi
 }
 
+assert_missing() {
+  [[ ! -e "$1" && ! -L "$1" ]] || fail "expected missing path: $1"
+}
+
 extract_apply_script() {
   awk '
     $0 == "cat > \"${SYSCTL_APPLY_SCRIPT}\" <<\047EOF\047" {
@@ -73,14 +77,7 @@ EOF
 
 extract_main2_library() {
   install -d "${TMP_DIR}/refresh"
-  awk '
-    $0 == "require_root" {
-      found = 1
-      exit
-    }
-    { print }
-    END { if (!found) exit 1 }
-  ' "${MAIN2}" > "${TMP_DIR}/refresh/main2-library.sh"
+  cp "${MAIN2}" "${TMP_DIR}/refresh/main2-library.sh"
   [[ -s "${TMP_DIR}/refresh/main2-library.sh" ]] || fail "failed to extract main2 functions"
 }
 
@@ -89,24 +86,64 @@ write_refresh_driver() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-export AUTO_UPDATE_SUPPORT=0
 # shellcheck disable=SC1090
 . "${MAIN2_TEST_LIBRARY}"
+AUTO_UPDATE_SUPPORT="${MAIN2_TEST_AUTO_UPDATE:-0}"
 
-file_sha256_is() {
+render_support() {
+  local kind="$1"
+  local path="$2"
+  printf '%s\n' '#!/usr/bin/env bash' "# ${kind}:${path}"
+}
+
+support_hash() {
+  render_support "$1" "$2" | sha256sum | awk '{print $1}'
+}
+
+support_script_expected_sha256() {
+  support_hash current "$1"
+}
+
+support_script_is_repository_version() {
   local path="$1"
-  local expected="$2"
-  [[ "${path}" == "${SCRIPT_DIR}/sysctl_optimization_debian_overwrite_main2.sh" &&
-     "${expected}" == "de2c23dde96fffba81210c58b8533bae6ad195a7f46a745e6f99078da19dd181" &&
-     "$(<"${path}")" == "known-outdated" ]]
+  local actual="$2"
+  [[ "${actual}" == "$(support_hash current "${path}")" ||
+     "${actual}" == "$(support_hash old "${path}")" ]]
 }
 
 download_file() {
-  local _url="$1"
+  local url="$1"
   local target="$2"
-  install -d "$(dirname "${target}")"
-  printf '%s\n' "${MAIN2_TEST_DOWNLOAD_CONTENT:-refreshed}" > "${target}"
-  printf '%s\n' "${target}" >> "${MAIN2_TEST_LOG}"
+  local path="${url#${RAW_BASE_URL}/}"
+  printf '%s\n' "${path}" >> "${MAIN2_TEST_LOG}"
+  case "${MAIN2_TEST_DOWNLOAD_MODE:-valid}" in
+    valid) render_support current "${path}" > "${target}" ;;
+    invalid)
+      if [[ "${path}" == "scripts/ssh_root.sh" ]]; then
+        render_support corrupt "${path}" > "${target}"
+      else
+        render_support current "${path}" > "${target}"
+      fi
+      ;;
+    failure) return 1 ;;
+    *) return 64 ;;
+  esac
+}
+
+MOVE_FAILURE_TRIGGERED=0
+mv() {
+  local source_index source target
+  target="${!#}"
+  if [[ "${MAIN2_TEST_MOVE_FAILURE:-0}" == "1" &&
+        "${MOVE_FAILURE_TRIGGERED}" == "0" &&
+        "${target}" == "${SCRIPT_DIR}/scripts/ssh_root.sh" ]]; then
+    MOVE_FAILURE_TRIGGERED=1
+    source_index=$(( $# - 1 ))
+    source="${!source_index}"
+    cp -- "${source}" "${target}"
+    return 1
+  fi
+  command mv "$@"
 }
 
 ensure_support_scripts
@@ -115,16 +152,26 @@ EOF
 }
 
 run_refresh_driver() {
-  local download_content="${1:-refreshed}"
+  local auto_update="${1:-0}"
+  local download_mode="${2:-valid}"
+  local move_failure="${3:-0}"
   MAIN2_TEST_LIBRARY="${TMP_DIR}/refresh/main2-library.sh" \
     MAIN2_TEST_LOG="${TMP_DIR}/refresh/downloads" \
-    MAIN2_TEST_DOWNLOAD_CONTENT="${download_content}" \
+    MAIN2_TEST_AUTO_UPDATE="${auto_update}" \
+    MAIN2_TEST_DOWNLOAD_MODE="${download_mode}" \
+    MAIN2_TEST_MOVE_FAILURE="${move_failure}" \
     bash "${TMP_DIR}/refresh/driver.sh"
 }
 
-test_support_script_refresh() {
-  local path download_count
+render_test_support() {
+  local kind="$1"
+  local path="$2"
+  printf '%s\n' '#!/usr/bin/env bash' "# ${kind}:${path}"
+}
 
+write_support_set() {
+  local kind="$1"
+  local path
   install -d "${TMP_DIR}/refresh/scripts"
   for path in \
     sysctl_optimization_debian_overwrite_main2.sh \
@@ -132,41 +179,206 @@ test_support_script_refresh() {
     scripts/ssh_root.sh \
     scripts/udp_multinic_main2.sh \
     scripts/mtu_mss_main2.sh; do
-    printf '%s\n' current > "${TMP_DIR}/refresh/${path}"
+    render_test_support "${kind}" "${path}" > "${TMP_DIR}/refresh/${path}"
+    chmod 0755 "${TMP_DIR}/refresh/${path}"
   done
-  printf '%s\n' known-outdated > "${TMP_DIR}/refresh/sysctl_optimization_debian_overwrite_main2.sh"
+}
+
+assert_support_set() {
+  local kind="$1"
+  local path
+  for path in \
+    sysctl_optimization_debian_overwrite_main2.sh \
+    scripts/swap.sh \
+    scripts/ssh_root.sh \
+    scripts/udp_multinic_main2.sh \
+    scripts/mtu_mss_main2.sh; do
+    assert_support_file "${kind}" "${path}"
+  done
+}
+
+assert_support_file() {
+  local kind="$1"
+  local path="$2"
+  cmp -s <(render_test_support "${kind}" "${path}") "${TMP_DIR}/refresh/${path}" ||
+    fail "support file is not ${kind}: ${path}"
+  [[ -x "${TMP_DIR}/refresh/${path}" ]] || fail "support file is not executable: ${path}"
+}
+
+test_support_manifest() (
+  local path actual expected entry historical_path historical_hash
+  # shellcheck disable=SC1090,SC1091
+  . "${TMP_DIR}/refresh/main2-library.sh"
+  # Read by production manifest functions from the extracted main2 library.
+  # shellcheck disable=SC2034
+  SCRIPT_DIR="${REPO_DIR}"
+
+  for path in \
+    sysctl_optimization_debian_overwrite_main2.sh \
+    scripts/swap.sh \
+    scripts/ssh_root.sh \
+    scripts/udp_multinic_main2.sh \
+    scripts/mtu_mss_main2.sh; do
+    actual="$(sha256sum "${REPO_DIR}/${path}" | awk '{print $1}')"
+    expected="$(support_script_expected_sha256 "${path}")"
+    assert_eq "${actual}" "${expected}" "production manifest hash for ${path}"
+    support_script_is_repository_version "${path}" "${actual}" ||
+      fail "current repository hash is not owned: ${path}"
+  done
+
+  for entry in \
+    sysctl_optimization_debian_overwrite_main2.sh:faaaf61b4756dd76548bdcd067653d3aed7a15f812680d13be8777e5f51dcfb9 \
+    sysctl_optimization_debian_overwrite_main2.sh:3c182e7aaf39971bb56d00a4e6625ee2e00c3e9d35235fea4f0e9f0488749d4e \
+    sysctl_optimization_debian_overwrite_main2.sh:55171030719d1f3ca2a213d57425b1b35d62e6eb9754917335b3469895ba4c3f \
+    sysctl_optimization_debian_overwrite_main2.sh:14ec6ab107edf0bae40cfb527fb598b59377f45352ed2f1f4a09e6e2901659cb \
+    sysctl_optimization_debian_overwrite_main2.sh:c3603bfa2e2a8acacd9d03023136d3c74431fcc6ca872db400c817e50340bce3 \
+    sysctl_optimization_debian_overwrite_main2.sh:de2c23dde96fffba81210c58b8533bae6ad195a7f46a745e6f99078da19dd181 \
+    scripts/swap.sh:c66cb47b309abb443710d473b66380d14f9526ae1cd0d4e720a32a0dcbd49d60 \
+    scripts/swap.sh:f40e4ba1b881a3d6a44c4b1a68de515dd183a2a73e887e1eb399def9762fab65 \
+    scripts/swap.sh:bfab5c1ad70b404f6779f442cc4f953eade15979e337b28422ee2d806b1858d3 \
+    scripts/swap.sh:f431b364f3e9a7bbca7e8858575d2ced85fe3d98000313f5d2ae6a20312de131 \
+    scripts/ssh_root.sh:3cc5428c9cc4efe0ff2359375e96e9c36884e86c5fbf2469325f157b0618e553 \
+    scripts/ssh_root.sh:5a4ec0c5f6c1907c0f92af96a69a0a62473f32bb1667da1d5ceee0b01afd6aed \
+    scripts/ssh_root.sh:f5e9f13a94acb111464995009996f17f00f356faeee12165835bf1a2f70be643 \
+    scripts/ssh_root.sh:5a92bdc5a47947fc573e282c2d7967a5ec5a352ed59b1d0c0685e19f411b1c3e; do
+    historical_path="${entry%%:*}"
+    historical_hash="${entry#*:}"
+    support_script_is_repository_version "${historical_path}" "${historical_hash}" ||
+      fail "historical repository hash is not owned: ${entry}"
+  done
+
+  if support_script_is_repository_version \
+    scripts/swap.sh \
+    3cc5428c9cc4efe0ff2359375e96e9c36884e86c5fbf2469325f157b0618e553; then
+    fail 'historical hash was accepted for the wrong path'
+  fi
+)
+
+test_support_script_refresh() {
+  local path download_count
+
+  rm -rf "${TMP_DIR}/refresh/scripts"
+  rm -f "${TMP_DIR}/refresh/sysctl_optimization_debian_overwrite_main2.sh"
   : > "${TMP_DIR}/refresh/downloads"
-
   run_refresh_driver > "${TMP_DIR}/refresh/output-first" 2>&1
-  assert_eq refreshed "$(<"${TMP_DIR}/refresh/sysctl_optimization_debian_overwrite_main2.sh")" 'known old optimizer is refreshed'
+  assert_support_set current
   download_count="$(wc -l < "${TMP_DIR}/refresh/downloads" | tr -d '[:space:]')"
-  assert_eq 1 "${download_count}" 'only known old optimizer is refreshed'
+  assert_eq 5 "${download_count}" 'fresh support install downloads every file'
 
-  run_refresh_driver > "${TMP_DIR}/refresh/output-second" 2>&1
+  : > "${TMP_DIR}/refresh/downloads"
+  run_refresh_driver > "${TMP_DIR}/refresh/output-current" 2>&1
   download_count="$(wc -l < "${TMP_DIR}/refresh/downloads" | tr -d '[:space:]')"
-  assert_eq 1 "${download_count}" 'refreshed optimizer is not downloaded again'
+  assert_eq 0 "${download_count}" 'current support bundle is not downloaded again'
 
-  printf '%s\n' custom > "${TMP_DIR}/refresh/sysctl_optimization_debian_overwrite_main2.sh"
-  run_refresh_driver > "${TMP_DIR}/refresh/output-custom" 2>&1
-  assert_eq custom "$(<"${TMP_DIR}/refresh/sysctl_optimization_debian_overwrite_main2.sh")" 'unknown regular optimizer is preserved'
+  write_support_set old
+  : > "${TMP_DIR}/refresh/downloads"
+  run_refresh_driver > "${TMP_DIR}/refresh/output-old" 2>&1
+  assert_support_set current
+  download_count="$(wc -l < "${TMP_DIR}/refresh/downloads" | tr -d '[:space:]')"
+  assert_eq 5 "${download_count}" 'known old support bundle is fully replaced'
 
+  : > "${TMP_DIR}/refresh/downloads"
+  run_refresh_driver 1 > "${TMP_DIR}/refresh/output-forced" 2>&1
+  assert_support_set current
+  download_count="$(wc -l < "${TMP_DIR}/refresh/downloads" | tr -d '[:space:]')"
+  assert_eq 5 "${download_count}" 'explicit refresh redownloads the owned bundle'
+
+  write_support_set current
   rm -f "${TMP_DIR}/refresh/scripts/swap.sh"
+  : > "${TMP_DIR}/refresh/downloads"
   run_refresh_driver > "${TMP_DIR}/refresh/output-missing" 2>&1
-  assert_eq refreshed "$(<"${TMP_DIR}/refresh/scripts/swap.sh")" 'missing support script is downloaded'
+  cmp -s <(render_test_support current scripts/swap.sh) "${TMP_DIR}/refresh/scripts/swap.sh" ||
+    fail 'missing support script is not restored'
+  download_count="$(wc -l < "${TMP_DIR}/refresh/downloads" | tr -d '[:space:]')"
+  assert_eq 1 "${download_count}" 'only the missing support script is downloaded'
 
+  write_support_set old
+  printf '%s\n' '#!/usr/bin/env bash' '# custom:scripts/mtu_mss_main2.sh' > \
+    "${TMP_DIR}/refresh/scripts/mtu_mss_main2.sh"
+  : > "${TMP_DIR}/refresh/downloads"
+  if run_refresh_driver > "${TMP_DIR}/refresh/output-custom" 2>&1; then
+    fail 'unknown support file unexpectedly succeeded'
+  fi
+  for path in \
+    sysctl_optimization_debian_overwrite_main2.sh \
+    scripts/swap.sh \
+    scripts/ssh_root.sh \
+    scripts/udp_multinic_main2.sh; do
+    assert_support_file old "${path}"
+  done
+  assert_eq '# custom:scripts/mtu_mss_main2.sh' \
+    "$(tail -n 1 "${TMP_DIR}/refresh/scripts/mtu_mss_main2.sh")" \
+    'custom support file is preserved'
+  download_count="$(wc -l < "${TMP_DIR}/refresh/downloads" | tr -d '[:space:]')"
+  assert_eq 0 "${download_count}" 'custom preflight fails before every download'
+  assert_contains '已停止全部同步' "${TMP_DIR}/refresh/output-custom"
+  : > "${TMP_DIR}/refresh/downloads"
+  if run_refresh_driver 1 > "${TMP_DIR}/refresh/output-custom-forced" 2>&1; then
+    fail 'explicit refresh overwrote an unknown support file'
+  fi
+  assert_eq '# custom:scripts/mtu_mss_main2.sh' \
+    "$(tail -n 1 "${TMP_DIR}/refresh/scripts/mtu_mss_main2.sh")" \
+    'explicit refresh preserves custom support file'
+  for path in \
+    sysctl_optimization_debian_overwrite_main2.sh \
+    scripts/swap.sh \
+    scripts/ssh_root.sh \
+    scripts/udp_multinic_main2.sh; do
+    assert_support_file old "${path}"
+  done
+  download_count="$(wc -l < "${TMP_DIR}/refresh/downloads" | tr -d '[:space:]')"
+  assert_eq 0 "${download_count}" 'explicit refresh custom preflight downloads nothing'
+
+  write_support_set old
+  : > "${TMP_DIR}/refresh/downloads"
+  if run_refresh_driver 0 invalid > "${TMP_DIR}/refresh/output-invalid-download" 2>&1; then
+    fail 'wrong download hash unexpectedly succeeded'
+  fi
+  assert_support_set old
+  assert_contains '配套脚本校验失败，原文件均未修改' "${TMP_DIR}/refresh/output-invalid-download"
+
+  write_support_set old
+  : > "${TMP_DIR}/refresh/downloads"
+  if run_refresh_driver 0 valid 1 > "${TMP_DIR}/refresh/output-move-failure" 2>&1; then
+    fail 'support replacement failure unexpectedly succeeded'
+  fi
+  assert_support_set old
+  assert_contains '配套脚本替换失败，已恢复原文件' "${TMP_DIR}/refresh/output-move-failure"
+  if find "${TMP_DIR}/refresh" -name '.main2-support-*' -print -quit | grep -q .; then
+    fail 'support replacement failure left temporary files'
+  fi
+
+  rm -f \
+    "${TMP_DIR}/refresh/sysctl_optimization_debian_overwrite_main2.sh" \
+    "${TMP_DIR}/refresh/scripts/swap.sh" \
+    "${TMP_DIR}/refresh/scripts/ssh_root.sh" \
+    "${TMP_DIR}/refresh/scripts/udp_multinic_main2.sh" \
+    "${TMP_DIR}/refresh/scripts/mtu_mss_main2.sh"
+  : > "${TMP_DIR}/refresh/downloads"
+  if run_refresh_driver 0 valid 1 > "${TMP_DIR}/refresh/output-fresh-move-failure" 2>&1; then
+    fail 'fresh support replacement failure unexpectedly succeeded'
+  fi
+  for path in \
+    sysctl_optimization_debian_overwrite_main2.sh \
+    scripts/swap.sh \
+    scripts/ssh_root.sh \
+    scripts/udp_multinic_main2.sh \
+    scripts/mtu_mss_main2.sh; do
+    assert_missing "${TMP_DIR}/refresh/${path}"
+  done
+  assert_contains '配套脚本替换失败，已恢复原文件' \
+    "${TMP_DIR}/refresh/output-fresh-move-failure"
+  if find "${TMP_DIR}/refresh" -name '.main2-support-*' -print -quit | grep -q .; then
+    fail 'fresh support replacement failure left temporary files'
+  fi
+
+  write_support_set current
   rm -f "${TMP_DIR}/refresh/sysctl_optimization_debian_overwrite_main2.sh"
   mkdir "${TMP_DIR}/refresh/sysctl_optimization_debian_overwrite_main2.sh"
   if run_refresh_driver > "${TMP_DIR}/refresh/output-nonregular" 2>&1; then
     fail 'non-regular support path unexpectedly succeeded'
   fi
   assert_contains '配套脚本路径不是普通文件，已停止同步' "${TMP_DIR}/refresh/output-nonregular"
-
-  rmdir "${TMP_DIR}/refresh/sysctl_optimization_debian_overwrite_main2.sh"
-  printf '%s\n' known-outdated > "${TMP_DIR}/refresh/sysctl_optimization_debian_overwrite_main2.sh"
-  if run_refresh_driver known-outdated > "${TMP_DIR}/refresh/output-stale-download" 2>&1; then
-    fail 'known old optimizer remained after download without stopping'
-  fi
-  assert_contains '同步后仍是已知故障版本，已停止执行' "${TMP_DIR}/refresh/output-stale-download"
 }
 
 build_apply_case() {
@@ -223,6 +435,7 @@ run_apply_case() {
 extract_apply_script
 write_mock_sysctl
 extract_main2_library
+test_support_manifest
 write_refresh_driver
 test_support_script_refresh
 
@@ -240,6 +453,26 @@ assert_contains 'NETDEV_BUDGET_USECS="${NETDEV_BUDGET_USECS:-2000}"' "${OPTIMIZE
 # shellcheck disable=SC2016
 assert_contains 'NETDEV_BUDGET_USECS="${NETDEV_BUDGET_USECS:-4000}"' "${OPTIMIZER}"
 assert_contains 'de2c23dde96fffba81210c58b8533bae6ad195a7f46a745e6f99078da19dd181' "${MAIN2}"
+assert_contains 'c3603bfa2e2a8acacd9d03023136d3c74431fcc6ca872db400c817e50340bce3' "${MAIN2}"
+assert_contains '14ec6ab107edf0bae40cfb527fb598b59377f45352ed2f1f4a09e6e2901659cb' "${MAIN2}"
+assert_contains '55171030719d1f3ca2a213d57425b1b35d62e6eb9754917335b3469895ba4c3f' "${MAIN2}"
+assert_contains '3c182e7aaf39971bb56d00a4e6625ee2e00c3e9d35235fea4f0e9f0488749d4e' "${MAIN2}"
+assert_contains 'faaaf61b4756dd76548bdcd067653d3aed7a15f812680d13be8777e5f51dcfb9' "${MAIN2}"
+assert_eq 832b9060a9d7153c74814ded4cbc4b35cc738998b1c2ac43f70de793736ee3ba \
+  "$(sha256sum "${REPO_DIR}/sysctl_optimization_debian_overwrite_main2.sh" | awk '{print $1}')" \
+  'optimizer manifest hash'
+assert_eq 41c053c9a310fdb5de36832a5ee58fabee7e4e39e7ab5e60747b40e09f8bc28e \
+  "$(sha256sum "${REPO_DIR}/scripts/swap.sh" | awk '{print $1}')" \
+  'swap manifest hash'
+assert_eq 8835074f48a8d5ebe50d7a723dccfd03245f245f44ea0fc73be2313d4440f9ae \
+  "$(sha256sum "${REPO_DIR}/scripts/ssh_root.sh" | awk '{print $1}')" \
+  'ssh manifest hash'
+assert_eq 374d98155e6a26415418274663a291369017302693246101aa89eaf402d88b44 \
+  "$(sha256sum "${REPO_DIR}/scripts/udp_multinic_main2.sh" | awk '{print $1}')" \
+  'UDP manifest hash'
+assert_eq b1b3b3e93aa4353572e1c1d4c20835a243884978f76aeca4eb6b5b7d0b5c14f6 \
+  "$(sha256sum "${REPO_DIR}/scripts/mtu_mss_main2.sh" | awk '{print $1}')" \
+  'MTU/MSS manifest hash'
 
 run_apply_case rejected 8000 2000 reject
 assert_eq 8000 "$(<"${TMP_DIR}/rejected/netdev_budget_usecs")" 'rejected target preserves current value'
