@@ -45,6 +45,15 @@ assert_not_contains() {
   fi
 }
 
+line_count() {
+  local path="$1"
+  if [[ -f "${path}" ]]; then
+    wc -l < "${path}" | tr -d '[:space:]'
+  else
+    printf '%s' 0
+  fi
+}
+
 build_main2_library() {
   local case_dir="$1"
   local root_dir="${case_dir}/rootfs"
@@ -52,10 +61,12 @@ build_main2_library() {
 
   install -d "${root_dir}/etc/security" "${root_dir}/etc/systemd/system" \
     "${root_dir}/etc/sysctl.d" "${root_dir}/etc/default" \
-    "${root_dir}/usr/local/sbin" "${root_dir}/var/lib" "${root_dir}/root"
+    "${root_dir}/usr/local/sbin" "${root_dir}/usr/share/keyrings" \
+    "${root_dir}/var/lib" "${root_dir}/root"
   sed \
     -e "s|/root|${root_dir}/root|g" \
     -e "s|/usr/local|${root_dir}/usr/local|g" \
+    -e "s|/usr/share|${root_dir}/usr/share|g" \
     -e "s|/var/lib|${root_dir}/var/lib|g" \
     -e "s|/etc|${root_dir}/etc|g" \
     -e "s|/run/systemd|${root_dir}/run/systemd|g" \
@@ -157,6 +168,664 @@ EOF
   printf '%s\n' legacy-network-config > "${root_dir}/etc/default/network-max-tune"
   printf '%s\n' legacy-network-service > "${root_dir}/etc/systemd/system/network-max-tune.service"
 }
+
+write_test_os_release() {
+  local root_dir="$1"
+  local os_id="$2"
+  local codename="$3"
+  local version_id="$4"
+  cat > "${root_dir}/etc/os-release" <<EOF
+ID=${os_id}
+VERSION_ID=${version_id}
+VERSION_CODENAME=${codename}
+PRETTY_NAME=${os_id}-${codename}
+EOF
+}
+
+write_test_archive_keyring() {
+  local root_dir="$1"
+  local os_id="$2"
+  local keyring
+  case "${os_id}" in
+    debian) keyring="${root_dir}/usr/share/keyrings/debian-archive-keyring.gpg" ;;
+    ubuntu) keyring="${root_dir}/usr/share/keyrings/ubuntu-archive-keyring.gpg" ;;
+    *) fail_test "unsupported test system id: ${os_id}" ;;
+  esac
+  printf '%s\n' "${os_id}-archive-keyring" > "${keyring}"
+}
+
+assert_no_source_transaction_files() {
+  local apt_dir="$1"
+  if find "${apt_dir}" -name '.main2-*-sources.*' -o -name '*.disabled.*' | grep -q .; then
+    fail_test "source transaction files remain under ${apt_dir}"
+  fi
+}
+
+test_debian_official_sources() (
+  local case_dir="${TMP_DIR}/debian-official-sources"
+  local root_dir="${case_dir}/rootfs"
+  local apt_dir="${root_dir}/etc/apt"
+  local source_dir="${apt_dir}/sources.list.d"
+  local apt_update_log="${case_dir}/apt-update.log"
+  local archive_keyring="${root_dir}/usr/share/keyrings/debian-archive-keyring.gpg"
+  local old_main='deb http://ftp.debian.org/debian bookworm main'
+  local old_dropin="Types: deb
+URIs: http://deb.debian.org/debian
+Suites: bookworm bookworm-updates
+Components: main
+Signed-By: ${archive_keyring}
+Contact: https://support.example.com
+
+Enabled: no
+Types: deb
+URIs: https://packages.example.com/debian
+Suites: bookworm
+Components: main"
+  local third_party='deb https://download.docker.com/linux/debian bookworm stable'
+  local expected="deb [signed-by=${archive_keyring}] http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+deb [signed-by=${archive_keyring}] http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
+deb [signed-by=${archive_keyring}] http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware"
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+  install -d "${source_dir}"
+  write_test_os_release "${root_dir}" debian bookworm 12
+  write_test_archive_keyring "${root_dir}" debian
+  printf '%s\n' "${old_main}" > "${apt_dir}/sources.list"
+  printf '%s\n' "${old_dropin}" > "${source_dir}/debian.sources"
+  printf '%s\n' "${third_party}" > "${source_dir}/docker.list"
+  printf '%s\n' first-backup > "${apt_dir}/sources.list.bak.20260727010101"
+  : > "${apt_update_log}"
+
+  source_uri_belongs_to_system debian 'http://ftp.debian.org/debian' ||
+    fail_test "ftp.debian.org was not recognized as a Debian system source"
+  source_uri_belongs_to_system debian 'http://http.us.debian.org/debian' ||
+    fail_test "http.us.debian.org was not recognized as a Debian system source"
+
+  # Invoked by source transaction functions from the extracted main2 library.
+  # shellcheck disable=SC2329
+  date() {
+    [[ "${1:-}" == "+%Y%m%d%H%M%S" ]] || return 64
+    printf '%s' 20260727010101
+  }
+  # shellcheck disable=SC2329
+  apt_update() {
+    printf '%s\n' update >> "${apt_update_log}"
+    grep -Fq 'http://deb.debian.org/debian bookworm main' "${apt_dir}/sources.list"
+  }
+
+  set_system_sources > "${case_dir}/output" 2>&1
+  assert_eq 1 "$(line_count "${apt_update_log}")" \
+    "Debian official source apt update count"
+  assert_eq "${expected}" "$(<"${apt_dir}/sources.list")" "Debian official sources"
+  assert_eq first-backup "$(<"${apt_dir}/sources.list.bak.20260727010101")" \
+    "existing Debian source backup preserved"
+  assert_eq "${old_main}" "$(<"${apt_dir}/sources.list.bak.20260727010101.1")" \
+    "new Debian source backup content"
+  assert_missing "${source_dir}/debian.sources"
+  assert_eq "${old_dropin}" \
+    "$(<"${source_dir}/debian.sources.disabled.20260727010101")" \
+    "disabled Debian source content"
+  assert_eq "${third_party}" "$(<"${source_dir}/docker.list")" \
+    "Debian third-party source preserved"
+  if find "${apt_dir}" -name '.main2-debian-sources.*' | grep -q .; then
+    fail_test "Debian source staging file remains"
+  fi
+
+  set_system_sources > "${case_dir}/repeat-output" 2>&1
+  assert_eq 2 "$(line_count "${apt_update_log}")" \
+    "repeated Debian official source apt update count"
+  assert_eq "${expected}" "$(<"${apt_dir}/sources.list")" \
+    "repeated Debian official sources"
+  assert_eq "${expected}" "$(<"${apt_dir}/sources.list.bak.20260727010101.2")" \
+    "repeated Debian source backup content"
+  assert_eq "${third_party}" "$(<"${source_dir}/docker.list")" \
+    "repeated Debian third-party source preserved"
+)
+
+test_debian_official_source_matrix() (
+  local case_dir="${TMP_DIR}/debian-source-matrix"
+  local root_dir="${case_dir}/rootfs"
+  local archive_keyring="${root_dir}/usr/share/keyrings/debian-archive-keyring.gpg"
+  local codename expected output
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+
+  for codename in buster bullseye bookworm trixie; do
+    output="${case_dir}/${codename}.list"
+    case "${codename}" in
+      buster)
+        expected="deb [check-valid-until=no signed-by=${archive_keyring}] http://archive.debian.org/debian buster main contrib non-free
+deb [check-valid-until=no signed-by=${archive_keyring}] http://archive.debian.org/debian buster-updates main contrib non-free
+deb [check-valid-until=no signed-by=${archive_keyring}] http://archive.debian.org/debian-security buster/updates main contrib non-free"
+        ;;
+      bullseye)
+        expected="deb [signed-by=${archive_keyring}] http://deb.debian.org/debian bullseye main contrib non-free
+deb [signed-by=${archive_keyring}] http://deb.debian.org/debian bullseye-updates main contrib non-free
+deb [signed-by=${archive_keyring}] http://security.debian.org/debian-security bullseye-security main contrib non-free"
+        ;;
+      bookworm)
+        expected="deb [signed-by=${archive_keyring}] http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+deb [signed-by=${archive_keyring}] http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
+deb [signed-by=${archive_keyring}] http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware"
+        ;;
+      trixie)
+        expected="deb [signed-by=${archive_keyring}] http://deb.debian.org/debian trixie main contrib non-free non-free-firmware
+deb [signed-by=${archive_keyring}] http://deb.debian.org/debian trixie-updates main contrib non-free non-free-firmware
+deb [signed-by=${archive_keyring}] http://security.debian.org/debian-security trixie-security main contrib non-free non-free-firmware"
+        ;;
+    esac
+    write_debian_official_sources "${output}" "${codename}" "${archive_keyring}"
+    assert_eq "${expected}" "$(<"${output}")" "Debian ${codename} source matrix"
+  done
+)
+
+test_ubuntu_official_sources() (
+  local architecture expected archive_marker forbidden_marker
+  for architecture in amd64 i386 arm64 armhf ppc64el riscv64 s390x; do
+    (
+      local test_architecture="${architecture}"
+      local case_dir="${TMP_DIR}/ubuntu-official-${architecture}"
+      local root_dir="${case_dir}/rootfs"
+      local apt_dir="${root_dir}/etc/apt"
+      local source_dir="${apt_dir}/sources.list.d"
+      local apt_update_log="${case_dir}/apt-update.log"
+      local archive_keyring="${root_dir}/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+      local old_main='deb http://archive.ubuntu.com/ubuntu noble main'
+      local old_dropin="Types: deb
+URIs: https://mirror.example.com/ubuntu
+Suites: noble noble-updates noble-security
+Components: main restricted universe multiverse
+Signed-By: ${archive_keyring}"
+      local regional_source="Types: deb
+URIs: https://regional.example.com/ubuntu
+Suites: noble-backports
+Components: main restricted universe multiverse
+Signed-By: ${archive_keyring}"
+      local regional_list="deb [signed-by=${archive_keyring}] https://regional-list.example.com/ubuntu noble main"
+      local third_party='deb https://ppa.launchpadcontent.net/example/repo/ubuntu noble main'
+
+      install -d "${case_dir}"
+      build_main2_library "${case_dir}"
+      # shellcheck disable=SC1090,SC1091
+      . "${case_dir}/main2-library.sh"
+      install -d "${source_dir}"
+      write_test_os_release "${root_dir}" ubuntu noble 24.04
+      write_test_archive_keyring "${root_dir}" ubuntu
+      printf '%s\n' "${old_main}" > "${apt_dir}/sources.list"
+      printf '%s\n' "${old_dropin}" > "${source_dir}/ubuntu.sources"
+      printf '%s\n' "${regional_source}" > "${source_dir}/regional.sources"
+      printf '%s\n' "${regional_list}" > "${source_dir}/regional.list"
+      printf '%s\n' "${third_party}" > "${source_dir}/ppa.list"
+      : > "${apt_update_log}"
+
+      if [[ "${architecture}" == "amd64" || "${architecture}" == "i386" ]]; then
+        expected="deb [arch=${architecture} signed-by=${archive_keyring}] http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+deb [arch=${architecture} signed-by=${archive_keyring}] http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+deb [arch=${architecture} signed-by=${archive_keyring}] http://archive.ubuntu.com/ubuntu noble-backports main restricted universe multiverse
+deb [arch=${architecture} signed-by=${archive_keyring}] http://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse"
+        archive_marker='http://archive.ubuntu.com/ubuntu'
+        forbidden_marker='ports.ubuntu.com'
+      else
+        expected="deb [arch=${architecture} signed-by=${archive_keyring}] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+deb [arch=${architecture} signed-by=${archive_keyring}] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+deb [arch=${architecture} signed-by=${archive_keyring}] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+deb [arch=${architecture} signed-by=${archive_keyring}] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse"
+        archive_marker='http://ports.ubuntu.com/ubuntu-ports'
+        forbidden_marker='archive.ubuntu.com'
+      fi
+
+      # Invoked by source transaction functions from the extracted main2 library.
+      # shellcheck disable=SC2329
+      date() {
+        [[ "${1:-}" == "+%Y%m%d%H%M%S" ]] || return 64
+        printf '%s' 20260727020202
+      }
+      # shellcheck disable=SC2329
+      dpkg() {
+        [[ "${1:-}" == "--print-architecture" ]] || return 64
+        printf '%s' "${test_architecture}"
+      }
+      # shellcheck disable=SC2329
+      apt_update() {
+        printf '%s\n' update >> "${apt_update_log}"
+        grep -Fq "${archive_marker}" "${apt_dir}/sources.list"
+      }
+
+      set_system_sources > "${case_dir}/output" 2>&1
+      assert_eq 1 "$(line_count "${apt_update_log}")" \
+        "Ubuntu ${architecture} apt update count"
+      assert_eq "${expected}" "$(<"${apt_dir}/sources.list")" \
+        "Ubuntu ${architecture} official sources"
+      assert_not_contains "${forbidden_marker}" "${apt_dir}/sources.list"
+      assert_eq "${old_main}" "$(<"${apt_dir}/sources.list.bak.20260727020202")" \
+        "Ubuntu ${architecture} source backup"
+      assert_missing "${source_dir}/ubuntu.sources"
+      assert_eq "${old_dropin}" \
+        "$(<"${source_dir}/ubuntu.sources.disabled.20260727020202")" \
+        "Ubuntu ${architecture} disabled system source"
+      assert_missing "${source_dir}/regional.sources"
+      assert_eq "${regional_source}" \
+        "$(<"${source_dir}/regional.sources.disabled.20260727020202")" \
+        "Ubuntu ${architecture} disabled nonstandard system source"
+      assert_missing "${source_dir}/regional.list"
+      assert_eq "${regional_list}" \
+        "$(<"${source_dir}/regional.list.disabled.20260727020202")" \
+        "Ubuntu ${architecture} disabled nonstandard list source"
+      assert_eq "${third_party}" "$(<"${source_dir}/ppa.list")" \
+        "Ubuntu ${architecture} third-party source preserved"
+      if find "${apt_dir}" -name '.main2-ubuntu-sources.*' | grep -q .; then
+        fail_test "Ubuntu ${architecture} source staging file remains"
+      fi
+    )
+  done
+)
+
+test_official_source_failure_rollback() (
+  local spec os_id codename architecture standard_file standard_content
+  for spec in 'debian:bookworm:amd64' 'ubuntu:noble:amd64'; do
+    IFS=: read -r os_id codename architecture <<< "${spec}"
+    (
+      local test_architecture="${architecture}"
+      local case_dir="${TMP_DIR}/source-rollback-${os_id}"
+      local root_dir="${case_dir}/rootfs"
+      local apt_dir="${root_dir}/etc/apt"
+      local source_dir="${apt_dir}/sources.list.d"
+      local apt_update_log="${case_dir}/apt-update.log"
+      local old_main
+      local third_party="deb https://download.docker.com/linux/${os_id} ${codename} stable"
+
+      if [[ "${os_id}" == "debian" ]]; then
+        old_main="deb http://deb.debian.org/debian ${codename} main"
+      else
+        old_main="deb http://archive.ubuntu.com/ubuntu ${codename} main"
+      fi
+
+      install -d "${case_dir}"
+      build_main2_library "${case_dir}"
+      # shellcheck disable=SC1090,SC1091
+      . "${case_dir}/main2-library.sh"
+      install -d "${source_dir}"
+      if [[ "${os_id}" == "debian" ]]; then
+        write_test_os_release "${root_dir}" "${os_id}" "${codename}" 12
+      else
+        write_test_os_release "${root_dir}" "${os_id}" "${codename}" 24.04
+      fi
+      write_test_archive_keyring "${root_dir}" "${os_id}"
+      printf '%s\n' "${old_main}" > "${apt_dir}/sources.list"
+      printf '%s\n' "${third_party}" > "${source_dir}/third-party.list"
+      if [[ "${os_id}" == "debian" ]]; then
+        standard_file="${source_dir}/debian.sources"
+        standard_content=$'Types: deb\nURIs: http://deb.debian.org/debian\nSuites: bookworm\nComponents: main'
+      else
+        standard_file="${source_dir}/ubuntu.sources"
+        standard_content=$'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\nComponents: main restricted'
+      fi
+      printf '%s\n' "${standard_content}" > "${standard_file}"
+      : > "${apt_update_log}"
+
+      # Invoked by source transaction functions from the extracted main2 library.
+      # shellcheck disable=SC2329
+      date() { printf '%s' 20260727030303; }
+      # shellcheck disable=SC2329
+      dpkg() {
+        [[ "${1:-}" == "--print-architecture" ]] || return 64
+        printf '%s' "${test_architecture}"
+      }
+      # shellcheck disable=SC2329
+      apt_update() {
+        printf '%s\n' update >> "${apt_update_log}"
+        [[ "$(line_count "${apt_update_log}")" -gt 1 ]]
+      }
+
+      if set_system_sources > "${case_dir}/output" 2>&1; then
+        fail_test "${os_id} source update failure unexpectedly succeeded"
+      fi
+      assert_eq 2 "$(line_count "${apt_update_log}")" \
+        "${os_id} rollback apt update count"
+      assert_eq "${old_main}" "$(<"${apt_dir}/sources.list")" \
+        "${os_id} main source restored"
+      assert_eq "${standard_content}" "$(<"${standard_file}")" \
+        "${os_id} standard source restored"
+      assert_eq "${third_party}" "$(<"${source_dir}/third-party.list")" \
+        "${os_id} third-party source preserved after rollback"
+      assert_no_source_transaction_files "${apt_dir}"
+      assert_contains "已恢复并重新刷新执行前的软件源" "${case_dir}/output"
+    )
+  done
+)
+
+test_official_source_preflight_guards() (
+  local case_dir="${TMP_DIR}/source-preflight"
+  local root_dir="${case_dir}/rootfs"
+  local apt_dir="${root_dir}/etc/apt"
+  local source_dir="${apt_dir}/sources.list.d"
+  local apt_update_log="${case_dir}/apt-update.log"
+  local old_main='deb http://archive.ubuntu.com/ubuntu noble main'
+  local mixed_content=$'  deb http://archive.ubuntu.com/ubuntu noble main\n\tdeb https://ppa.launchpadcontent.net/example/repo/ubuntu noble main'
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+  install -d "${source_dir}"
+  write_test_os_release "${root_dir}" ubuntu noble 24.04
+  write_test_archive_keyring "${root_dir}" ubuntu
+  printf '%s\n' "${old_main}" > "${apt_dir}/sources.list"
+  printf '%s\n' "${mixed_content}" > "${source_dir}/mixed.list"
+  : > "${apt_update_log}"
+
+  # Invoked by source transaction functions from the extracted main2 library.
+  # shellcheck disable=SC2329
+  dpkg() {
+    [[ "${1:-}" == "--print-architecture" ]] || return 64
+    printf '%s' amd64
+  }
+  # shellcheck disable=SC2329
+  apt_update() {
+    printf '%s\n' update >> "${apt_update_log}"
+  }
+
+  if set_system_sources > "${case_dir}/mixed-output" 2>&1; then
+    fail_test "mixed Ubuntu system and third-party source unexpectedly succeeded"
+  fi
+  assert_eq 0 "$(line_count "${apt_update_log}")" "mixed source apt update count"
+  assert_eq "${old_main}" "$(<"${apt_dir}/sources.list")" "mixed source main file unchanged"
+  assert_eq "${mixed_content}" "$(<"${source_dir}/mixed.list")" \
+    "mixed source file unchanged"
+  assert_contains "系统源与第三方源混合" "${case_dir}/mixed-output"
+  assert_no_source_transaction_files "${apt_dir}"
+
+  rm -f -- "${source_dir}/mixed.list"
+  mkdir "${source_dir}/ubuntu.sources"
+  if set_system_sources > "${case_dir}/unsafe-output" 2>&1; then
+    fail_test "non-regular Ubuntu source path unexpectedly succeeded"
+  fi
+  assert_eq 0 "$(line_count "${apt_update_log}")" \
+    "non-regular source apt update count"
+  assert_eq "${old_main}" "$(<"${apt_dir}/sources.list")" \
+    "non-regular source main file unchanged"
+  assert_contains "APT 系统源文件不是安全的普通文件" "${case_dir}/unsafe-output"
+)
+
+test_official_source_early_guards() (
+  local case_dir="${TMP_DIR}/source-early-guards"
+  local root_dir="${case_dir}/rootfs"
+  local apt_dir="${root_dir}/etc/apt"
+  local source_dir="${apt_dir}/sources.list.d"
+  local apt_update_calls=0
+  local old_main='deb http://archive.ubuntu.com/ubuntu noble main'
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+  install -d "${source_dir}"
+  write_test_os_release "${root_dir}" ubuntu noble 24.04
+  printf '%s\n' "${old_main}" > "${apt_dir}/sources.list"
+
+  # Invoked by source transaction functions from the extracted main2 library.
+  # shellcheck disable=SC2329
+  dpkg() {
+    [[ "${1:-}" == "--print-architecture" ]] || return 64
+    printf '%s' amd64
+  }
+  # shellcheck disable=SC2329
+  apt_update() {
+    apt_update_calls=$((apt_update_calls + 1))
+  }
+
+  if set_system_sources > "${case_dir}/keyring-output" 2>&1; then
+    fail_test "missing Ubuntu archive keyring unexpectedly succeeded"
+  fi
+  assert_eq 0 "${apt_update_calls}" "missing keyring apt update count"
+  assert_eq "${old_main}" "$(<"${apt_dir}/sources.list")" \
+    "missing keyring source unchanged"
+  assert_contains "发行版 APT 密钥环不是可读的普通文件" \
+    "${case_dir}/keyring-output"
+  assert_no_source_transaction_files "${apt_dir}"
+
+  write_test_archive_keyring "${root_dir}" ubuntu
+  # shellcheck disable=SC2329
+  dpkg() {
+    [[ "${1:-}" == "--print-architecture" ]] || return 64
+    printf '%s' mips64el
+  }
+  if set_system_sources > "${case_dir}/architecture-output" 2>&1; then
+    fail_test "unsupported Ubuntu architecture unexpectedly succeeded"
+  fi
+  assert_eq 0 "${apt_update_calls}" "unsupported architecture apt update count"
+  assert_eq "${old_main}" "$(<"${apt_dir}/sources.list")" \
+    "unsupported architecture source unchanged"
+  assert_contains "未配置 Ubuntu mips64el 的官方仓库地址" \
+    "${case_dir}/architecture-output"
+  assert_no_source_transaction_files "${apt_dir}"
+)
+
+test_main_source_mixed_guard() (
+  local case_dir="${TMP_DIR}/mixed-main-source"
+  local root_dir="${case_dir}/rootfs"
+  local apt_dir="${root_dir}/etc/apt"
+  local source_dir="${apt_dir}/sources.list.d"
+  local apt_update_log="${case_dir}/apt-update.log"
+  local mixed_main=$'deb http://archive.ubuntu.com/ubuntu noble main\ndeb https://download.docker.com/linux/ubuntu noble stable'
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+  install -d "${source_dir}"
+  write_test_os_release "${root_dir}" ubuntu noble 24.04
+  write_test_archive_keyring "${root_dir}" ubuntu
+  printf '%s\n' "${mixed_main}" > "${apt_dir}/sources.list"
+  : > "${apt_update_log}"
+
+  # Invoked by source transaction functions from the extracted main2 library.
+  # shellcheck disable=SC2329
+  dpkg() { printf '%s' amd64; }
+  # shellcheck disable=SC2329
+  apt_update() { printf '%s\n' update >> "${apt_update_log}"; }
+
+  if set_system_sources > "${case_dir}/output" 2>&1; then
+    fail_test "mixed APT main source unexpectedly succeeded"
+  fi
+  assert_eq "${mixed_main}" "$(<"${apt_dir}/sources.list")" \
+    "mixed APT main source unchanged"
+  assert_eq 0 "$(line_count "${apt_update_log}")" "mixed APT main update count"
+  assert_contains "APT 主源包含无法确认归属的活动仓库" "${case_dir}/output"
+  assert_no_source_transaction_files "${apt_dir}"
+)
+
+test_disabled_standard_source_is_ignored() (
+  local case_dir="${TMP_DIR}/disabled-standard-source"
+  local root_dir="${case_dir}/rootfs"
+  local apt_dir="${root_dir}/etc/apt"
+  local source_dir="${apt_dir}/sources.list.d"
+  local apt_update_log="${case_dir}/apt-update.log"
+  local disabled_source=$'Enabled: no   \nTypes: deb\nURIs: https://packages.example.com/ubuntu\nSuites: noble\nComponents: main'
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+  install -d "${source_dir}"
+  write_test_os_release "${root_dir}" ubuntu noble 24.04
+  write_test_archive_keyring "${root_dir}" ubuntu
+  printf '%s\n' 'deb http://archive.ubuntu.com/ubuntu noble main' > \
+    "${apt_dir}/sources.list"
+  printf '%s\n' "${disabled_source}" > "${source_dir}/ubuntu.sources"
+  : > "${apt_update_log}"
+
+  # Invoked by source transaction functions from the extracted main2 library.
+  # shellcheck disable=SC2329
+  date() { printf '%s' 20260727050505; }
+  # shellcheck disable=SC2329
+  dpkg() { printf '%s' amd64; }
+  # shellcheck disable=SC2329
+  apt_update() { printf '%s\n' update >> "${apt_update_log}"; }
+
+  set_system_sources > "${case_dir}/output" 2>&1
+  assert_eq 1 "$(line_count "${apt_update_log}")" \
+    "disabled standard source apt update count"
+  assert_eq "${disabled_source}" "$(<"${source_dir}/ubuntu.sources")" \
+    "disabled standard source preserved"
+  assert_contains 'deb [arch=amd64 signed-by=' "${apt_dir}/sources.list"
+  assert_no_source_transaction_files "${apt_dir}"
+)
+
+test_source_transaction_interrupt_rollback() (
+  local case_dir="${TMP_DIR}/source-interrupt"
+  local root_dir="${case_dir}/rootfs"
+  local apt_dir="${root_dir}/etc/apt"
+  local source_dir="${apt_dir}/sources.list.d"
+  local apt_update_log="${case_dir}/apt-update.log"
+  local old_main='deb http://deb.debian.org/debian bookworm main'
+  local old_dropin=$'Types: deb\nURIs: http://security.debian.org/debian-security\nSuites: bookworm-security\nComponents: main'
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+  install -d "${source_dir}"
+  write_test_os_release "${root_dir}" debian bookworm 12
+  write_test_archive_keyring "${root_dir}" debian
+  printf '%s\n' "${old_main}" > "${apt_dir}/sources.list"
+  printf '%s\n' "${old_dropin}" > "${source_dir}/debian.sources"
+  : > "${apt_update_log}"
+
+  # Invoked by source transaction functions from the extracted main2 library.
+  # shellcheck disable=SC2329
+  date() { printf '%s' 20260727060606; }
+  # shellcheck disable=SC2329
+  apt_update() {
+    printf '%s\n' update >> "${apt_update_log}"
+    kill -TERM "${BASHPID}"
+  }
+
+  if set_system_sources > "${case_dir}/output" 2>&1; then
+    fail_test "interrupted source transaction unexpectedly succeeded"
+  fi
+  assert_eq 1 "$(line_count "${apt_update_log}")" \
+    "interrupted source transaction apt update count"
+  assert_eq "${old_main}" "$(<"${apt_dir}/sources.list")" \
+    "interrupted main source restored"
+  assert_eq "${old_dropin}" "$(<"${source_dir}/debian.sources")" \
+    "interrupted drop-in source restored"
+  assert_contains "官方源切换被中断，已恢复执行前的软件源" "${case_dir}/output"
+  assert_no_source_transaction_files "${apt_dir}"
+)
+
+test_source_move_interrupt_rollback() (
+  local case_dir="${TMP_DIR}/source-move-interrupt"
+  local root_dir="${case_dir}/rootfs"
+  local apt_dir="${root_dir}/etc/apt"
+  local source_dir="${apt_dir}/sources.list.d"
+  local apt_update_log="${case_dir}/apt-update.log"
+  local target_backup="${apt_dir}/sources.list.bak.20260727060607"
+  local old_main='deb http://deb.debian.org/debian bookworm main'
+  local old_dropin=$'Types: deb\nURIs: http://security.debian.org/debian-security\nSuites: bookworm-security\nComponents: main'
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+  install -d "${source_dir}"
+  write_test_os_release "${root_dir}" debian bookworm 12
+  write_test_archive_keyring "${root_dir}" debian
+  printf '%s\n' "${old_main}" > "${apt_dir}/sources.list"
+  printf '%s\n' "${old_dropin}" > "${source_dir}/debian.sources"
+  : > "${apt_update_log}"
+
+  # Invoked by source transaction functions from the extracted main2 library.
+  # shellcheck disable=SC2329
+  date() { printf '%s' 20260727060607; }
+  # shellcheck disable=SC2329
+  mv() {
+    local -a move_args=("$@")
+    local argument_count="${#move_args[@]}"
+    local source_path="${move_args[argument_count - 2]}"
+    local destination_path="${move_args[argument_count - 1]}"
+    command mv "$@" || return 1
+    if [[ "${source_path}" == "${apt_dir}/sources.list" &&
+          "${destination_path}" == "${target_backup}" ]]; then
+      kill -TERM "${BASHPID}"
+    fi
+  }
+  # shellcheck disable=SC2329
+  apt_update() { printf '%s\n' update >> "${apt_update_log}"; }
+
+  if set_system_sources > "${case_dir}/output" 2>&1; then
+    fail_test "interrupted main source move unexpectedly succeeded"
+  fi
+  assert_eq 0 "$(line_count "${apt_update_log}")" \
+    "interrupted main source move apt update count"
+  assert_eq "${old_main}" "$(<"${apt_dir}/sources.list")" \
+    "interrupted main source move restored"
+  assert_eq "${old_dropin}" "$(<"${source_dir}/debian.sources")" \
+    "source drop-in unchanged after main source move interrupt"
+  assert_contains "官方源切换被中断，已恢复执行前的软件源" "${case_dir}/output"
+  assert_no_source_transaction_files "${apt_dir}"
+)
+
+test_source_rollback_ignores_second_signal() (
+  local case_dir="${TMP_DIR}/source-rollback-signal"
+  local root_dir="${case_dir}/rootfs"
+  local apt_dir="${root_dir}/etc/apt"
+  local source_dir="${apt_dir}/sources.list.d"
+  local apt_update_log="${case_dir}/apt-update.log"
+  local target_backup="${apt_dir}/sources.list.bak.20260727070707"
+  local old_main='deb http://deb.debian.org/debian bookworm main'
+  local old_dropin=$'Types: deb\nURIs: http://security.debian.org/debian-security\nSuites: bookworm-security\nComponents: main'
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+  install -d "${source_dir}"
+  write_test_os_release "${root_dir}" debian bookworm 12
+  write_test_archive_keyring "${root_dir}" debian
+  printf '%s\n' "${old_main}" > "${apt_dir}/sources.list"
+  printf '%s\n' "${old_dropin}" > "${source_dir}/debian.sources"
+  : > "${apt_update_log}"
+
+  # Invoked by source transaction functions from the extracted main2 library.
+  # shellcheck disable=SC2329
+  date() { printf '%s' 20260727070707; }
+  # shellcheck disable=SC2329
+  mv() {
+    local -a move_args=("$@")
+    local argument_count="${#move_args[@]}"
+    local source_path="${move_args[argument_count - 2]}"
+    local destination_path="${move_args[argument_count - 1]}"
+    command mv "$@" || return 1
+    if [[ "${source_path}" == "${target_backup}" &&
+          "${destination_path}" == "${apt_dir}/sources.list" ]]; then
+      kill -TERM "${BASHPID}"
+    fi
+  }
+  # shellcheck disable=SC2329
+  apt_update() {
+    printf '%s\n' update >> "${apt_update_log}"
+    [[ "$(line_count "${apt_update_log}")" -gt 1 ]]
+  }
+
+  if set_system_sources > "${case_dir}/output" 2>&1; then
+    fail_test "failed official update unexpectedly reported success"
+  fi
+  assert_eq 2 "$(line_count "${apt_update_log}")" \
+    "rollback signal apt update count"
+  assert_eq "${old_main}" "$(<"${apt_dir}/sources.list")" \
+    "rollback signal main source restored"
+  assert_eq "${old_dropin}" "$(<"${source_dir}/debian.sources")" \
+    "rollback signal drop-in restored"
+  assert_contains "已恢复并重新刷新执行前的软件源" "${case_dir}/output"
+  assert_no_source_transaction_files "${apt_dir}"
+)
 
 test_main2_lock_gate() (
   local case_dir="${TMP_DIR}/main2-lock"
@@ -497,6 +1166,10 @@ test_required_package_commands_fail_closed() (
 
   # shellcheck disable=SC2329
   require_supported_os() { return 0; }
+  # shellcheck disable=SC2329
+  system_id() { printf '%s' debian; }
+  # shellcheck disable=SC2329
+  set_debian_sources() { apt_update; }
   # shellcheck disable=SC2329
   apt_update() {
     echo apt-update >> "${case_dir}/commands.log"
@@ -1468,6 +2141,17 @@ test_optimizer_backup_call_order() (
 
 test_main2_lock_gate
 test_main2_lock_call_order
+test_debian_official_sources
+test_debian_official_source_matrix
+test_ubuntu_official_sources
+test_official_source_failure_rollback
+test_official_source_preflight_guards
+test_official_source_early_guards
+test_main_source_mixed_guard
+test_disabled_standard_source_is_ignored
+test_source_transaction_interrupt_rollback
+test_source_move_interrupt_rollback
+test_source_rollback_ignores_second_signal
 test_fresh_prepare_is_noop
 test_legacy_and_incomplete_udp_migrate
 test_invalid_udp_fails_before_writes

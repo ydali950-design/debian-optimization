@@ -18,6 +18,7 @@ Debian / Ubuntu relay / VPN landing host network optimization scripts.
 - 提供 Debian / Ubuntu IPv4 UDP 多网卡映射脚本，修正 UDP 多网卡回包源地址，减少 UDP 流量走错出口导致的丢包
 - 提供 swap 管理和 root SSH 管理脚本
 - 默认安装并启用 Chrony，重启服务后执行 `chronyc makestep` 立即校准系统时间
+- `main2.sh` 默认按系统和软件包架构切换 Debian/Ubuntu 官方源，刷新失败时自动恢复原源
 
 ## 使用
 
@@ -50,7 +51,7 @@ systemctl enable irqbalance
 
 ## main2 测试版
 
-`main2.sh` 用于全新 Debian/Ubuntu 机器，也能自动接管已经完整执行过本仓库 `main.sh` 的机器。测试期间不会修改 `main.sh`。
+`main2.sh` 用于全新 Debian/Ubuntu 机器，也能自动接管已经完整执行过本仓库 `main.sh` 的机器，并支持以后下载新版脚本直接覆盖更新。测试期间不会修改 `main.sh`。
 
 在独立目录运行：
 
@@ -115,14 +116,15 @@ systemctl enable irqbalance
 首次执行默认完成：
 
 ```bash
+# 按系统和软件包架构设置 Debian/Ubuntu 官方源
 apt update
 apt install chrony -y
 systemctl enable chrony
 systemctl restart chrony
 chronyc makestep
-关闭 IPv6
-执行用户态 TCP/UDP 中转和代理落地优化
-安装并启用 irqbalance
+# 关闭 IPv6
+# 执行用户态 TCP/UDP 中转和代理落地优化
+# 安装并启用 irqbalance
 ```
 
 全新机器上，`main2` 使用独立的 `/etc/sysctl.d/99-network-optimization.conf` 和 `/etc/security/limits.d/99-network-optimization.conf`，不会覆盖现有 `/etc/sysctl.conf` 或 `/etc/security/limits.conf`。
@@ -159,9 +161,13 @@ REAPPLY_INIT=1 PROFILE=max bash main2.sh
 
 `main2` 需要 Debian 或 Ubuntu 使用 systemd 作为 PID 1；在普通容器、chroot 或 systemd 未启动的环境中会在修改系统前停止。
 
-在 Debian 上刷新软件源时，脚本会清理 `/etc/apt/sources.list.d/` 里旧的 Debian 官方源残留，例如已经失效的 `bullseye-backports`，但会保留 Docker、Cloudflare、Tailscale、NodeSource 等常见第三方源。Debian 10 会自动使用 `archive.debian.org`，Debian 11/12/13 默认不启用 backports。
+在 Debian 上，Debian 10 使用官方 `archive.debian.org`；Debian 11/12/13 使用官方 `deb.debian.org/debian` 和 `security.debian.org/debian-security`，默认不启用 backports。每条源都精确绑定 `/usr/share/keyrings/debian-archive-keyring.gpg`。
 
-在 Ubuntu 上，脚本保留系统现有的 `/etc/apt/sources.list` 和 `/etc/apt/sources.list.d/ubuntu.sources` 配置，只执行 `apt-get update`。这可以兼容 Ubuntu 官方镜像、云厂商区域镜像和 Ubuntu 24.04 使用的 deb822 源格式。
+在 Ubuntu 上，`amd64`、`i386` 使用官方 `archive.ubuntu.com/ubuntu` 和 `security.ubuntu.com/ubuntu`；`arm64`、`armhf`、`ppc64el`、`riscv64`、`s390x` 使用官方 `ports.ubuntu.com/ubuntu-ports`。每条源都精确绑定 `/usr/share/keyrings/ubuntu-archive-keyring.gpg` 并限制为当前原生架构，避免 foreign architecture 从错误端点请求索引。
+
+切换前，脚本会备份 `/etc/apt/sources.list`，停用单独文件中的旧系统源，并保留独立 `.list` 或 `.sources` 文件中的第三方仓库。deb822 文件即使使用非标准文件名或云厂商镜像，也会根据当前系统代号和发行版密钥环识别并停用；只含 `Enabled: no` 的文件保持不动。主源含无法确认归属的活动仓库、同一扩展源文件混合系统源与第三方源、目标是符号链接或其他非普通文件时，脚本会在修改前停止，要求先拆分配置。
+
+新官方源写入后会立即执行 `apt-get update`。刷新失败或切换事务收到 `INT`、`TERM`、异常退出时，`main2.sh` 会恢复执行前的主源和扩展源；普通刷新失败还会用恢复后的配置重新刷新。同一秒重复执行也不会覆盖已有备份。菜单 `2` 可以随时重新设置当前系统官方源。
 
 如果只想执行网络优化脚本：
 

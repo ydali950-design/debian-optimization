@@ -7,8 +7,10 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 RAW_BASE_URL="${RAW_BASE_URL:-https://raw.githubusercontent.com/ydali950-design/debian-optimization/refs/heads/main}"
 AUTO_UPDATE_SUPPORT="${AUTO_UPDATE_SUPPORT:-0}"
-MAIN2_BUNDLE_VERSION=2026072502
+MAIN2_BUNDLE_VERSION=2026072701
 MAIN2_MANAGED_CONFIG_FORMAT=1
+DEBIAN_ARCHIVE_KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
+UBUNTU_ARCHIVE_KEYRING="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
 OPTIMIZER="${SCRIPT_DIR}/sysctl_optimization_debian_overwrite_main2.sh"
 SWAP_SCRIPT="${SCRIPT_DIR}/scripts/swap.sh"
 SSH_ROOT_SCRIPT="${SCRIPT_DIR}/scripts/ssh_root.sh"
@@ -474,24 +476,57 @@ confirm() {
 }
 
 detect_codename() {
-  local codename=""
+  local codename="" os_id="" version_id=""
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
     . /etc/os-release
+    os_id="${ID:-}"
+    version_id="${VERSION_ID:-}"
     codename="${VERSION_CODENAME:-}"
   fi
 
   if [[ -z "${codename}" ]]; then
+    if [[ "${os_id}" != "debian" || ! -r /etc/debian_version ]]; then
+      fail "无法从 /etc/os-release 精确读取 ${os_id:-当前系统} 的 VERSION_CODENAME。"
+      return 1
+    fi
     case "$(cat /etc/debian_version)" in
       13*) codename="trixie" ;;
       12*) codename="bookworm" ;;
       11*) codename="bullseye" ;;
       10*) codename="buster" ;;
-      *) fail "无法识别 Debian 版本。"; exit 1 ;;
+      *) fail "无法识别 Debian 版本。"; return 1 ;;
+    esac
+  fi
+  [[ "${codename}" =~ ^[a-z][a-z0-9]*$ ]] || {
+    fail "系统版本代号格式无效：${codename}"
+    return 1
+  }
+  if [[ "${os_id}" == "debian" ]]; then
+    case "${version_id}:${codename}" in
+      10:buster|11:bullseye|12:bookworm|13:trixie) ;;
+      *)
+        fail "Debian VERSION_ID=${version_id:-缺失} 与 VERSION_CODENAME=${codename} 不匹配。"
+        return 1
+        ;;
     esac
   fi
 
   printf "%s" "${codename}"
+}
+
+detect_deb_architecture() {
+  local architecture
+  command -v dpkg >/dev/null 2>&1 || {
+    fail "未找到 dpkg，无法识别 Ubuntu 软件源架构。"
+    return 1
+  }
+  architecture="$(dpkg --print-architecture)" || return 1
+  [[ "${architecture}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
+    fail "dpkg 返回的软件包架构格式无效：${architecture}"
+    return 1
+  }
+  printf '%s' "${architecture}"
 }
 
 apt_update() {
@@ -521,36 +556,678 @@ ensure_download_tool() {
   }
 }
 
-is_debian_official_source_file() {
-  local file="$1"
+source_uri_belongs_to_system() {
+  local os_id="$1"
+  local uri="${2%/}"
+  case "${os_id}" in
+    debian)
+      [[ "${uri}" =~ ^https?://(deb\.debian\.org/debian|deb\.debian\.org/debian-security|security\.debian\.org/debian-security|ftp\.debian\.org/debian|ftp\.[^/]+\.debian\.org/debian|http\.us\.debian\.org/debian|httpredir\.debian\.org/debian|archive\.debian\.org/debian|archive\.debian\.org/debian-security)$ ]]
+      ;;
+    ubuntu)
+      [[ "${uri}" =~ ^https?://(([[:alnum:]-]+\.)*archive\.ubuntu\.com/ubuntu|security\.ubuntu\.com/ubuntu|ports\.ubuntu\.com/ubuntu-ports|old-releases\.ubuntu\.com/ubuntu)$ ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
 
-  if grep -Eiq 'download\.docker\.com|cloudflare|tailscale|nodesource|nginx\.org|packages\.microsoft\.com' "${file}"; then
+active_source_uris() {
+  local file="$1"
+  case "${file}" in
+    *.list)
+      awk '
+        /^[[:space:]]*(#|$)/ { next }
+        {
+          line = $0
+          sub(/#.*/, "", line)
+          sub(/^[[:space:]]+/, "", line)
+          count = split(line, fields, /[[:space:]]+/)
+          if (fields[1] != "deb" && fields[1] != "deb-src") next
+          field_index = 2
+          if (fields[field_index] ~ /^\[/) {
+            while (field_index <= count && fields[field_index] !~ /\]$/) field_index++
+            field_index++
+          }
+          if (field_index <= count) print fields[field_index]
+        }
+      ' "${file}"
+      ;;
+    *.sources)
+      awk '
+        function reset_stanza() {
+          types = ""
+          uris = ""
+          enabled = "yes"
+          current = ""
+        }
+        function emit_stanza(    count, item_index, values) {
+          if (tolower(enabled) == "no" || types !~ /(^|[[:space:]])deb(-src)?([[:space:]]|$)/) return
+          count = split(uris, values, /[[:space:]]+/)
+          for (item_index = 1; item_index <= count; item_index++) {
+            if (values[item_index] != "") print values[item_index]
+          }
+        }
+        BEGIN { reset_stanza() }
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*$/ { emit_stanza(); reset_stanza(); next }
+        /^[[:space:]]/ {
+          value = $0
+          sub(/^[[:space:]]+/, "", value)
+          sub(/[[:space:]]+$/, "", value)
+          if (current == "types") types = types " " value
+          if (current == "uris") uris = uris " " value
+          if (current == "enabled") enabled = enabled " " value
+          next
+        }
+        {
+          separator = index($0, ":")
+          if (separator == 0) { current = ""; next }
+          field = tolower(substr($0, 1, separator - 1))
+          value = substr($0, separator + 1)
+          sub(/^[[:space:]]+/, "", value)
+          sub(/[[:space:]]+$/, "", value)
+          current = field
+          if (field == "types") types = value
+          else if (field == "uris") uris = value
+          else if (field == "enabled") enabled = value
+        }
+        END { emit_stanza() }
+      ' "${file}"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+archive_keyring_for_os() {
+  case "$1" in
+    debian) printf '%s' "${DEBIAN_ARCHIVE_KEYRING}" ;;
+    ubuntu) printf '%s' "${UBUNTU_ARCHIVE_KEYRING}" ;;
+    *) fail "不支持的软件源系统 ID：$1"; return 1 ;;
+  esac
+}
+
+require_archive_keyring() {
+  local os_id="$1"
+  local keyring
+  keyring="$(archive_keyring_for_os "${os_id}")" || return 1
+  [[ -f "${keyring}" && ! -L "${keyring}" && -r "${keyring}" ]] || {
+    fail "发行版 APT 密钥环不是可读的普通文件：${keyring}"
+    return 1
+  }
+}
+
+deb822_file_distribution_match() {
+  local os_id="$1"
+  local file="$2"
+  local codename="$3"
+  local keyring="$4"
+  local match_mode="$5"
+
+  [[ "${file}" == *.sources ]] || return 1
+  awk -v os_id="${os_id}" -v codename="${codename}" \
+      -v keyring="${keyring}" -v match_mode="${match_mode}" '
+    function reset_stanza() {
+      types = ""
+      suites = ""
+      signed_by = ""
+      enabled = "yes"
+      current = ""
+    }
+    function suite_is_valid(suite) {
+      if (suite == codename || suite == codename "-updates" ||
+          suite == codename "-backports" || suite == codename "-security") return 1
+      if (os_id == "ubuntu" && suite == codename "-proposed") return 1
+      if (os_id == "debian" && codename == "buster" && suite == codename "/updates") return 1
+      return 0
+    }
+    function validate_stanza(    count, item_index, stanza_valid, values) {
+      if (tolower(enabled) == "no" || types !~ /(^|[[:space:]])deb(-src)?([[:space:]]|$)/) return
+      active_stanzas++
+      stanza_valid = signed_by == keyring
+      count = split(suites, values, /[[:space:]]+/)
+      if (count == 0) stanza_valid = 0
+      for (item_index = 1; item_index <= count; item_index++) {
+        if (values[item_index] != "" && !suite_is_valid(values[item_index])) stanza_valid = 0
+      }
+      if (stanza_valid) matched_stanzas++
+      else invalid = 1
+    }
+    BEGIN { reset_stanza() }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { validate_stanza(); reset_stanza(); next }
+    /^[[:space:]]/ {
+      value = $0
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      if (current == "types") types = types " " value
+      else if (current == "suites") suites = suites " " value
+      else if (current == "signed-by") signed_by = signed_by " " value
+      else if (current == "enabled") enabled = enabled " " value
+      next
+    }
+    {
+      separator = index($0, ":")
+      if (separator == 0) { current = ""; next }
+      field = tolower(substr($0, 1, separator - 1))
+      value = substr($0, separator + 1)
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      current = field
+      if (field == "types") types = value
+      else if (field == "suites") suites = value
+      else if (field == "signed-by") signed_by = value
+      else if (field == "enabled") enabled = value
+    }
+    END {
+      validate_stanza()
+      if (match_mode == "any") exit(matched_stanzas > 0 ? 0 : 1)
+      exit(active_stanzas > 0 && invalid == 0 ? 0 : 1)
+    }
+  ' "${file}"
+}
+
+list_file_distribution_match() {
+  local os_id="$1"
+  local file="$2"
+  local codename="$3"
+  local keyring="$4"
+  local match_mode="$5"
+
+  [[ "${file}" == *.list ]] || return 1
+  awk -v os_id="${os_id}" -v codename="${codename}" \
+      -v keyring="${keyring}" -v match_mode="${match_mode}" '
+    function suite_is_valid(suite) {
+      if (suite == codename || suite == codename "-updates" ||
+          suite == codename "-backports" || suite == codename "-security") return 1
+      if (os_id == "ubuntu" && suite == codename "-proposed") return 1
+      if (os_id == "debian" && codename == "buster" && suite == codename "/updates") return 1
+      return 0
+    }
+    /^[[:space:]]*(#|$)/ { next }
+    {
+      line = $0
+      sub(/#.*/, "", line)
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      count = split(line, fields, /[[:space:]]+/)
+      if (fields[1] != "deb" && fields[1] != "deb-src") next
+      active_entries++
+      field_index = 2
+      signed_by = ""
+      if (fields[field_index] ~ /^\[/) {
+        while (field_index <= count) {
+          option = fields[field_index]
+          sub(/^\[/, "", option)
+          sub(/\]$/, "", option)
+          if (option ~ /^signed-by=/) signed_by = substr(option, 11)
+          if (fields[field_index] ~ /\]$/) {
+            field_index++
+            break
+          }
+          field_index++
+        }
+      }
+      suite_index = field_index + 1
+      entry_valid = signed_by == keyring && suite_index <= count &&
+                    suite_is_valid(fields[suite_index])
+      if (entry_valid) matched_entries++
+      else invalid = 1
+    }
+    END {
+      if (match_mode == "any") exit(matched_entries > 0 ? 0 : 1)
+      exit(active_entries > 0 && invalid == 0 ? 0 : 1)
+    }
+  ' "${file}"
+}
+
+source_file_is_distribution_source() {
+  local os_id="$1"
+  local file="$2"
+  local codename="$3"
+  local keyring="$4"
+  case "${file}" in
+    *.list) list_file_distribution_match "${os_id}" "${file}" "${codename}" "${keyring}" all ;;
+    *.sources) deb822_file_distribution_match "${os_id}" "${file}" "${codename}" "${keyring}" all ;;
+    *) return 1 ;;
+  esac
+}
+
+source_file_has_distribution_source() {
+  local os_id="$1"
+  local file="$2"
+  local codename="$3"
+  local keyring="$4"
+  case "${file}" in
+    *.list) list_file_distribution_match "${os_id}" "${file}" "${codename}" "${keyring}" any ;;
+    *.sources) deb822_file_distribution_match "${os_id}" "${file}" "${codename}" "${keyring}" any ;;
+    *) return 1 ;;
+  esac
+}
+
+source_file_has_active_uri() {
+  local file="$1"
+  local uri
+  while IFS= read -r uri; do
+    [[ -n "${uri}" ]] && return 0
+  done < <(active_source_uris "${file}")
+  return 1
+}
+
+source_file_belongs_to_system() {
+  local os_id="$1"
+  local file="$2"
+  local uri
+
+  while IFS= read -r uri; do
+    if source_uri_belongs_to_system "${os_id}" "${uri}"; then
+      return 0
+    fi
+  done < <(active_source_uris "${file}")
+  return 1
+}
+
+source_file_has_non_system_uri() {
+  local os_id="$1"
+  local file="$2"
+  local uri
+
+  while IFS= read -r uri; do
+    if ! source_uri_belongs_to_system "${os_id}" "${uri}"; then
+      return 0
+    fi
+  done < <(active_source_uris "${file}")
+  return 1
+}
+
+unique_source_backup_path() {
+  local path="$1"
+  local suffix="$2"
+  local result="${path}.${suffix}"
+  local index=0
+
+  while [[ -e "${result}" || -L "${result}" ]]; do
+    index=$((index + 1))
+    result="${path}.${suffix}.${index}"
+  done
+  printf '%s' "${result}"
+}
+
+prepare_apt_source_directories() {
+  local source_dir="/etc/apt/sources.list.d"
+  [[ -d /etc/apt && ! -L /etc/apt ]] || {
+    fail "APT 配置目录不是安全的真实目录：/etc/apt"
+    return 1
+  }
+  if [[ ( -e "${source_dir}" || -L "${source_dir}" ) &&
+        ( ! -d "${source_dir}" || -L "${source_dir}" ) ]]; then
+    fail "APT 扩展源目录不是安全的真实目录：${source_dir}"
+    return 1
+  fi
+  if [[ ! -e "${source_dir}" && ! -L "${source_dir}" ]]; then
+    install -d -m 0755 "${source_dir}" || return 1
+  fi
+  [[ -d "${source_dir}" && ! -L "${source_dir}" ]] || {
+    fail "APT 扩展源目录不是安全的真实目录：${source_dir}"
+    return 1
+  }
+}
+
+rollback_official_sources() {
+  local target="$1"
+  local target_existed="$2"
+  local target_backup="$3"
+  shift 3
+  local rollback_failed=0 original disabled
+
+  if [[ "${target_existed}" == "1" ]]; then
+    if [[ -f "${target_backup}" && ! -L "${target_backup}" ]]; then
+      if [[ -e "${target}" || -L "${target}" ]]; then
+        if [[ ! -f "${target}" || -L "${target}" ]] ||
+           ! rm -f -- "${target}"; then
+          rollback_failed=1
+        fi
+      fi
+      if [[ ! -e "${target}" && ! -L "${target}" ]] &&
+         ! mv -f -- "${target_backup}" "${target}"; then
+        rollback_failed=1
+      fi
+    elif [[ -e "${target_backup}" || -L "${target_backup}" ]]; then
+      rollback_failed=1
+    elif [[ ! -f "${target}" || -L "${target}" ]]; then
+      rollback_failed=1
+    fi
+  elif [[ -e "${target}" || -L "${target}" ]]; then
+    if [[ ! -f "${target}" || -L "${target}" ]] || ! rm -f -- "${target}"; then
+      rollback_failed=1
+    fi
+  fi
+
+  while (( $# >= 2 )); do
+    original="$1"
+    disabled="$2"
+    shift 2
+    if [[ -f "${disabled}" && ! -L "${disabled}" &&
+          ! -e "${original}" && ! -L "${original}" ]]; then
+      if ! mv -f -- "${disabled}" "${original}"; then
+        rollback_failed=1
+      fi
+    elif [[ ! -f "${original}" || -L "${original}" ||
+            -e "${disabled}" || -L "${disabled}" ]]; then
+      rollback_failed=1
+    fi
+  done
+  [[ "${rollback_failed}" == "0" ]]
+}
+
+rollback_source_transaction_on_exit() {
+  local exit_status=$?
+  trap - EXIT
+  trap '' INT TERM
+  if [[ "${source_transaction_active:-0}" == "1" ]]; then
+    if rollback_official_sources \
+        "${target}" "${target_existed}" "${target_backup}" "${moved_pairs[@]}"; then
+      fail "官方源切换被中断，已恢复执行前的软件源。"
+    else
+      fail "官方源切换被中断，且原软件源未完整恢复；请立即检查 /etc/apt。"
+    fi
+  fi
+  exit "${exit_status}"
+}
+
+exit_if_source_transaction_interrupted() {
+  if [[ "${source_transaction_interrupted:-0}" == "1" ]]; then
+    exit "${source_transaction_signal_status:-1}"
+  fi
+}
+
+activate_official_sources() (
+  local os_id="$1"
+  local staged_source_file="$2"
+  local codename="$3"
+  local archive_keyring="$4"
+  local target="/etc/apt/sources.list"
+  local source_dir="/etc/apt/sources.list.d"
+  local standard_source_file stamp target_backup="" file disabled
+  local target_existed=0 rollback_failed=0 source_move_completed=0 apt_update_status=0
+  local source_transaction_active=0
+  local source_transaction_interrupted=0 source_transaction_signal_status=0
+  local -a source_files=()
+  local -a moved_pairs=()
+
+  case "${os_id}" in
+    debian) standard_source_file="${source_dir}/debian.sources" ;;
+    ubuntu) standard_source_file="${source_dir}/ubuntu.sources" ;;
+    *) fail "不支持的软件源系统 ID：${os_id}"; return 1 ;;
+  esac
+  prepare_apt_source_directories || return 1
+  [[ -f "${staged_source_file}" && ! -L "${staged_source_file}" ]] || {
+    fail "官方源暂存文件不是安全的普通文件：${staged_source_file}"
+    return 1
+  }
+  if [[ ( -e "${target}" || -L "${target}" ) &&
+        ( ! -f "${target}" || -L "${target}" ) ]]; then
+    fail "APT 主源文件不是安全的普通文件：${target}"
+    return 1
+  fi
+  if [[ -f "${target}" ]] && source_file_has_active_uri "${target}"; then
+    if source_file_is_distribution_source \
+        "${os_id}" "${target}" "${codename}" "${archive_keyring}"; then
+      :
+    elif source_file_has_distribution_source \
+        "${os_id}" "${target}" "${codename}" "${archive_keyring}" ||
+         source_file_has_non_system_uri "${os_id}" "${target}"; then
+      fail "APT 主源包含无法确认归属的活动仓库：${target}"
+      fail "请先把第三方仓库拆分到独立文件，或移除旧的非官方系统镜像。"
+      return 1
+    fi
+  fi
+  if [[ ( -e "${standard_source_file}" || -L "${standard_source_file}" ) &&
+        ( ! -f "${standard_source_file}" || -L "${standard_source_file}" ) ]]; then
+    fail "APT 系统源文件不是安全的普通文件：${standard_source_file}"
     return 1
   fi
 
-  if grep -Eiq '(deb\.debian\.org/debian|security\.debian\.org/debian-security|ftp\.[^[:space:]/]+\.debian\.org/debian|httpredir\.debian\.org/debian|archive\.debian\.org/debian|archive\.debian\.org/debian-security)' "${file}"; then
-    return 0
-  fi
-
-  grep -Eiq '(^|[[:space:]])(buster|bullseye|bookworm|trixie)-backports([[:space:]]|$)' "${file}" \
-    && grep -Eiq '/debian([[:space:]]|$)|/debian-security([[:space:]]|$)' "${file}"
-}
-
-disable_conflicting_debian_source_files() {
-  local stamp file disabled
-  stamp="$(date +%Y%m%d%H%M%S)"
-
   shopt -s nullglob
-  for file in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-    [[ -f "${file}" ]] || continue
-    if is_debian_official_source_file "${file}"; then
-      cp -a "${file}" "${file}.bak.${stamp}"
-      disabled="${file}.disabled.${stamp}"
-      mv "${file}" "${disabled}"
-      warn "已禁用旧 Debian 源文件：${file} -> ${disabled}"
+  for file in "${source_dir}"/*.list "${source_dir}"/*.sources; do
+    if [[ -L "${file}" || ! -f "${file}" ]]; then
+      fail "APT 源路径不是安全的普通文件：${file}"
+      shopt -u nullglob
+      return 1
+    fi
+    if ! source_file_has_active_uri "${file}"; then
+      continue
+    fi
+    if source_file_is_distribution_source \
+        "${os_id}" "${file}" "${codename}" "${archive_keyring}"; then
+      source_files+=("${file}")
+    elif source_file_has_distribution_source \
+        "${os_id}" "${file}" "${codename}" "${archive_keyring}"; then
+      fail "检测到系统源与第三方源混合在同一文件，未自动移动：${file}"
+      fail "请先把第三方仓库拆分到独立的 .list 或 .sources 文件。"
+      shopt -u nullglob
+      return 1
+    elif source_file_belongs_to_system "${os_id}" "${file}"; then
+      if source_file_has_non_system_uri "${os_id}" "${file}"; then
+        fail "检测到系统源与第三方源混合在同一文件，未自动移动：${file}"
+        fail "请先把第三方仓库拆分到独立的 .list 或 .sources 文件。"
+        shopt -u nullglob
+        return 1
+      fi
+      source_files+=("${file}")
+    elif [[ "${file}" == "${standard_source_file}" ]]; then
+      fail "无法确认标准系统源文件只包含 ${os_id} 仓库：${file}"
+      fail "请先把第三方仓库拆分到独立的 .list 或 .sources 文件。"
+      shopt -u nullglob
+      return 1
     fi
   done
   shopt -u nullglob
+
+  stamp="$(date +%Y%m%d%H%M%S)" || return 1
+  if [[ -e "${target}" ]]; then
+    target_existed=1
+    target_backup="$(unique_source_backup_path "${target}" "bak.${stamp}")" || return 1
+  fi
+
+  trap 'source_transaction_interrupted=1; source_transaction_signal_status=130' INT
+  trap 'source_transaction_interrupted=1; source_transaction_signal_status=143' TERM
+  trap rollback_source_transaction_on_exit EXIT
+
+  if [[ "${target_existed}" == "1" ]]; then
+    if ! mv -- "${target}" "${target_backup}"; then
+      if [[ -f "${target_backup}" && ! -L "${target_backup}" &&
+            ! -e "${target}" && ! -L "${target}" ]]; then
+        source_transaction_active=1
+      else
+        trap - EXIT INT TERM
+        if [[ "${source_transaction_interrupted}" == "1" ]]; then
+          return "${source_transaction_signal_status}"
+        fi
+        fail "无法备份 APT 主源文件：${target}"
+        return 1
+      fi
+    else
+      source_transaction_active=1
+    fi
+  else
+    source_transaction_active=1
+  fi
+  exit_if_source_transaction_interrupted
+
+  for file in "${source_files[@]}"; do
+    exit_if_source_transaction_interrupted
+    disabled="$(unique_source_backup_path "${file}" "disabled.${stamp}")" || {
+      rollback_failed=1
+      break
+    }
+    source_move_completed=0
+    if ! mv -- "${file}" "${disabled}"; then
+      rollback_failed=1
+      if [[ -f "${disabled}" && ! -L "${disabled}" &&
+            ! -e "${file}" && ! -L "${file}" ]]; then
+        source_move_completed=1
+      fi
+    else
+      source_move_completed=1
+    fi
+    if [[ "${source_move_completed}" == "1" ]]; then
+      moved_pairs+=("${file}" "${disabled}")
+    fi
+    exit_if_source_transaction_interrupted
+    [[ "${rollback_failed}" == "0" ]] || break
+    warn "已停用旧 ${os_id} 系统源：${file} -> ${disabled}"
+  done
+
+  exit_if_source_transaction_interrupted
+  if [[ "${rollback_failed}" == "0" ]]; then
+    if ! mv -- "${staged_source_file}" "${target}"; then
+      rollback_failed=1
+    fi
+    exit_if_source_transaction_interrupted
+  fi
+  if [[ "${rollback_failed}" == "1" ]]; then
+    trap '' INT TERM
+    if rollback_official_sources "${target}" "${target_existed}" "${target_backup}" \
+      "${moved_pairs[@]}"; then
+      source_transaction_active=0
+      trap - EXIT INT TERM
+      fail "官方源写入失败，已恢复原软件源。"
+    else
+      source_transaction_active=0
+      trap - EXIT INT TERM
+      fail "官方源写入失败，且原软件源未完整恢复；请立即检查 /etc/apt。"
+    fi
+    return 1
+  fi
+
+  exit_if_source_transaction_interrupted
+  apt_update || apt_update_status=$?
+  exit_if_source_transaction_interrupted
+  if [[ "${apt_update_status}" != "0" ]]; then
+    trap '' INT TERM
+    if rollback_official_sources "${target}" "${target_existed}" "${target_backup}" \
+      "${moved_pairs[@]}"; then
+      source_transaction_active=0
+      trap - EXIT INT TERM
+      if apt_update; then
+        fail "官方源刷新失败，已恢复并重新刷新执行前的软件源。"
+      else
+        fail "官方源刷新失败；原软件源已恢复，但原软件源也刷新失败。"
+      fi
+    else
+      source_transaction_active=0
+      trap - EXIT INT TERM
+      fail "官方源刷新失败，且原软件源未完整恢复；请立即检查 /etc/apt。"
+    fi
+    return 1
+  fi
+
+  source_transaction_active=0
+  trap - EXIT INT TERM
+  if [[ "${target_existed}" == "1" ]]; then
+    ok "原 APT 主源已备份为 ${target_backup}"
+  fi
+)
+
+write_debian_official_sources() {
+  local target="$1"
+  local codename="$2"
+  local archive_keyring="$3"
+  local components
+
+  case "${codename}" in
+    bookworm|trixie) components="main contrib non-free non-free-firmware" ;;
+    buster|bullseye) components="main contrib non-free" ;;
+    *) fail "不支持将 Debian ${codename} 设置为本脚本内置官方源。"; return 1 ;;
+  esac
+
+  if [[ "${codename}" == "buster" ]]; then
+    cat > "${target}" <<EOF
+deb [check-valid-until=no signed-by=${archive_keyring}] http://archive.debian.org/debian ${codename} ${components}
+deb [check-valid-until=no signed-by=${archive_keyring}] http://archive.debian.org/debian ${codename}-updates ${components}
+deb [check-valid-until=no signed-by=${archive_keyring}] http://archive.debian.org/debian-security ${codename}/updates ${components}
+EOF
+  else
+    cat > "${target}" <<EOF
+deb [signed-by=${archive_keyring}] http://deb.debian.org/debian ${codename} ${components}
+deb [signed-by=${archive_keyring}] http://deb.debian.org/debian ${codename}-updates ${components}
+deb [signed-by=${archive_keyring}] http://security.debian.org/debian-security ${codename}-security ${components}
+EOF
+  fi
+}
+
+write_ubuntu_official_sources() {
+  local target="$1"
+  local codename="$2"
+  local architecture="$3"
+  local archive_keyring="$4"
+  local archive_uri security_uri
+  local components="main restricted universe multiverse"
+
+  case "${architecture}" in
+    amd64|i386)
+      archive_uri="http://archive.ubuntu.com/ubuntu"
+      security_uri="http://security.ubuntu.com/ubuntu"
+      ;;
+    arm64|armhf|ppc64el|riscv64|s390x)
+      archive_uri="http://ports.ubuntu.com/ubuntu-ports"
+      security_uri="${archive_uri}"
+      ;;
+    *) fail "本脚本未配置 Ubuntu ${architecture} 的官方仓库地址。"; return 1 ;;
+  esac
+
+  cat > "${target}" <<EOF
+deb [arch=${architecture} signed-by=${archive_keyring}] ${archive_uri} ${codename} ${components}
+deb [arch=${architecture} signed-by=${archive_keyring}] ${archive_uri} ${codename}-updates ${components}
+deb [arch=${architecture} signed-by=${archive_keyring}] ${archive_uri} ${codename}-backports ${components}
+deb [arch=${architecture} signed-by=${archive_keyring}] ${security_uri} ${codename}-security ${components}
+EOF
+}
+
+set_debian_sources() {
+  local codename archive_keyring staged_source_file
+  require_supported_os
+  if [[ "$(system_id)" != "debian" ]]; then
+    fail "设置 Debian 官方源仅支持 Debian 系统。"
+    return 1
+  fi
+  codename="$(detect_codename)" || return 1
+  require_archive_keyring debian || return 1
+  archive_keyring="$(archive_keyring_for_os debian)" || return 1
+  prepare_apt_source_directories || return 1
+  staged_source_file="$(mktemp /etc/apt/.main2-debian-sources.XXXXXX)" || return 1
+  if ! write_debian_official_sources \
+       "${staged_source_file}" "${codename}" "${archive_keyring}" ||
+     ! chmod 0644 "${staged_source_file}" ||
+     ! activate_official_sources \
+       debian "${staged_source_file}" "${codename}" "${archive_keyring}"; then
+    rm -f -- "${staged_source_file}" || true
+    return 1
+  fi
+  ok "Debian ${codename} 官方源已设置并刷新。"
+}
+
+set_ubuntu_sources() {
+  local codename architecture archive_keyring staged_source_file
+  require_supported_os
+  if [[ "$(system_id)" != "ubuntu" ]]; then
+    fail "设置 Ubuntu 官方源仅支持 Ubuntu 系统。"
+    return 1
+  fi
+  codename="$(detect_codename)" || return 1
+  architecture="$(detect_deb_architecture)" || return 1
+  require_archive_keyring ubuntu || return 1
+  archive_keyring="$(archive_keyring_for_os ubuntu)" || return 1
+  prepare_apt_source_directories || return 1
+  staged_source_file="$(mktemp /etc/apt/.main2-ubuntu-sources.XXXXXX)" || return 1
+  if ! write_ubuntu_official_sources \
+       "${staged_source_file}" "${codename}" "${architecture}" "${archive_keyring}" ||
+     ! chmod 0644 "${staged_source_file}" ||
+     ! activate_official_sources \
+       ubuntu "${staged_source_file}" "${codename}" "${archive_keyring}"; then
+    rm -f -- "${staged_source_file}" || true
+    return 1
+  fi
+  ok "Ubuntu ${codename} ${architecture} 官方源已设置并刷新。"
 }
 
 install_base_tools() {
@@ -562,52 +1239,12 @@ install_base_tools() {
   ok "基础组件安装完成。"
 }
 
-set_debian_sources() {
-  require_supported_os
-  if [[ "$(system_id)" != "debian" ]]; then
-    fail "设置 Debian 官方源仅支持 Debian 系统。"
-    return 1
-  fi
-  local codename backup components
-  codename="$(detect_codename)"
-  backup="/etc/apt/sources.list.bak.$(date +%Y%m%d%H%M%S)"
-
-  case "${codename}" in
-    bookworm|trixie) components="main contrib non-free non-free-firmware" ;;
-    buster|bullseye) components="main contrib non-free" ;;
-    *) fail "不支持将 Debian ${codename} 重置为本脚本内置源。"; return 1 ;;
-  esac
-
-  disable_conflicting_debian_source_files
-
-  if [[ -e /etc/apt/sources.list ]]; then
-    cp -a /etc/apt/sources.list "${backup}"
-  else
-    touch /etc/apt/sources.list
-    backup="无，原文件不存在"
-  fi
-
-  if [[ "${codename}" == "buster" ]]; then
-    cat > /etc/apt/sources.list <<EOF
-deb [check-valid-until=no] http://archive.debian.org/debian ${codename} ${components}
-deb [check-valid-until=no] http://archive.debian.org/debian ${codename}-updates ${components}
-deb [check-valid-until=no] http://archive.debian.org/debian-security ${codename}/updates ${components}
-EOF
-  else
-    cat > /etc/apt/sources.list <<EOF
-deb http://deb.debian.org/debian ${codename} ${components}
-deb http://deb.debian.org/debian ${codename}-updates ${components}
-deb http://security.debian.org/debian-security ${codename}-security ${components}
-EOF
-  fi
-
-  apt_update
-  ok "Debian ${codename} 官方源已设置，原文件备份为 ${backup}"
-}
-
 set_system_sources() {
-  apt_update || return 1
-  ok "系统软件源已刷新，保留现有镜像与组件配置。"
+  case "$(system_id)" in
+    debian) set_debian_sources ;;
+    ubuntu) set_ubuntu_sources ;;
+    *) fail "仅支持设置 Debian 或 Ubuntu 官方源。"; return 1 ;;
+  esac
 }
 
 is_legacy_sysctl_file() {
@@ -1698,7 +2335,7 @@ default_setup() {
   fi
 
   profile="${PROFILE:-balanced}"
-  warn "开始默认初始化：刷新系统软件源 -> 安装并校准 Chrony -> 关闭 IPv6 -> 执行用户态 TCP/UDP 代理优化 -> 安装并启用 irqbalance。"
+  warn "开始默认初始化：设置 Debian/Ubuntu 官方源 -> 安装并校准 Chrony -> 关闭 IPv6 -> 执行用户态 TCP/UDP 代理优化 -> 安装并启用 irqbalance。"
   set_system_sources || return 1
   install_base_tools || return 1
   install_chrony || return 1
@@ -1796,7 +2433,7 @@ main_menu() {
     ok " 用户态 TCP/UDP 中转 / 代理落地优化"
     ok "====================================="
     printf " 1. 安装基础组件\n"
-    printf " 2. 刷新系统软件源\n"
+    printf " 2. 设置官方源并刷新\n"
     printf " 3. 执行网络优化 balanced\n"
     printf " 4. 执行网络优化 max\n"
     printf " 5. Swap 管理\n"
