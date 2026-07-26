@@ -161,7 +161,7 @@ REAPPLY_INIT=1 PROFILE=max bash main2.sh
 
 `main2` 需要 Debian 或 Ubuntu 使用 systemd 作为 PID 1；在普通容器、chroot 或 systemd 未启动的环境中会在修改系统前停止。
 
-在 Debian 上，Debian 10 使用官方 `archive.debian.org`；Debian 11/12/13 使用官方 `deb.debian.org/debian` 和 `security.debian.org/debian-security`，默认不启用 backports。每条源都精确绑定 `/usr/share/keyrings/debian-archive-keyring.gpg`。
+在 Debian 上，Debian 10 使用官方 `archive.debian.org`；Debian 11/12/13 使用官方 `deb.debian.org/debian` 和 `security.debian.org/debian-security`，默认不启用 backports。每条源都精确绑定 `/usr/share/keyrings/debian-archive-keyring.gpg`。脚本兼容 Debian 13 官方 `debian-archive-keyring` 包创建的 `debian-archive-keyring.gpg -> debian-archive-keyring.pgp` 相对符号链接，并继续拒绝其他链接关系、断链和不可读目标。
 
 在 Ubuntu 上，`amd64`、`i386` 使用官方 `archive.ubuntu.com/ubuntu` 和 `security.ubuntu.com/ubuntu`；`arm64`、`armhf`、`ppc64el`、`riscv64`、`s390x` 使用官方 `ports.ubuntu.com/ubuntu-ports`。每条源都精确绑定 `/usr/share/keyrings/ubuntu-archive-keyring.gpg` 并限制为当前原生架构，避免 foreign architecture 从错误端点请求索引。
 

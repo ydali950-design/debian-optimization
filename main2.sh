@@ -7,9 +7,10 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 RAW_BASE_URL="${RAW_BASE_URL:-https://raw.githubusercontent.com/ydali950-design/debian-optimization/refs/heads/main}"
 AUTO_UPDATE_SUPPORT="${AUTO_UPDATE_SUPPORT:-0}"
-MAIN2_BUNDLE_VERSION=2026072701
+MAIN2_BUNDLE_VERSION=2026072702
 MAIN2_MANAGED_CONFIG_FORMAT=1
 DEBIAN_ARCHIVE_KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
+DEBIAN_ARCHIVE_KEYRING_LINK_TARGET="debian-archive-keyring.pgp"
 UBUNTU_ARCHIVE_KEYRING="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
 OPTIMIZER="${SCRIPT_DIR}/sysctl_optimization_debian_overwrite_main2.sh"
 SWAP_SCRIPT="${SCRIPT_DIR}/scripts/swap.sh"
@@ -647,12 +648,45 @@ archive_keyring_for_os() {
 
 require_archive_keyring() {
   local os_id="$1"
-  local keyring
+  local keyring link_target link_target_path
   keyring="$(archive_keyring_for_os "${os_id}")" || return 1
-  [[ -f "${keyring}" && ! -L "${keyring}" && -r "${keyring}" ]] || {
-    fail "发行版 APT 密钥环不是可读的普通文件：${keyring}"
+
+  if [[ ! -e "${keyring}" && ! -L "${keyring}" ]]; then
+    fail "发行版 APT 密钥环不存在：${keyring}"
     return 1
-  }
+  fi
+  if [[ -L "${keyring}" ]]; then
+    if [[ "${os_id}" != "debian" ]]; then
+      fail "Ubuntu APT 密钥环不允许使用符号链接：${keyring}"
+      return 1
+    fi
+    link_target="$(readlink -- "${keyring}")" || {
+      fail "无法读取 Debian APT 密钥环符号链接：${keyring}"
+      return 1
+    }
+    if [[ "${link_target}" != "${DEBIAN_ARCHIVE_KEYRING_LINK_TARGET}" ]]; then
+      fail "Debian APT 密钥环不是官方包定义的符号链接：${keyring}"
+      return 1
+    fi
+    link_target_path="${keyring%/*}/${DEBIAN_ARCHIVE_KEYRING_LINK_TARGET}"
+    if [[ ! -f "${link_target_path}" || -L "${link_target_path}" ]]; then
+      fail "Debian APT 密钥环链接目标不是普通文件：${link_target_path}"
+      return 1
+    fi
+    if [[ ! -r "${link_target_path}" ]]; then
+      fail "Debian APT 密钥环链接目标不可读：${link_target_path}"
+      return 1
+    fi
+    return 0
+  fi
+  if [[ ! -f "${keyring}" ]]; then
+    fail "发行版 APT 密钥环不是普通文件：${keyring}"
+    return 1
+  fi
+  if [[ ! -r "${keyring}" ]]; then
+    fail "发行版 APT 密钥环不可读：${keyring}"
+    return 1
+  fi
 }
 
 deb822_file_distribution_match() {

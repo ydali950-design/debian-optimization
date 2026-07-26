@@ -274,15 +274,17 @@ deb [signed-by=${archive_keyring}] http://security.debian.org/debian-security bo
     fail_test "Debian source staging file remains"
   fi
 
+  mv -- "${archive_keyring}" "${archive_keyring%.gpg}.pgp"
+  ln -s debian-archive-keyring.pgp "${archive_keyring}"
   set_system_sources > "${case_dir}/repeat-output" 2>&1
   assert_eq 2 "$(line_count "${apt_update_log}")" \
-    "repeated Debian official source apt update count"
+    "Debian archive keyring symlink apt update count"
   assert_eq "${expected}" "$(<"${apt_dir}/sources.list")" \
-    "repeated Debian official sources"
+    "Debian archive keyring symlink official sources"
   assert_eq "${expected}" "$(<"${apt_dir}/sources.list.bak.20260727010101.2")" \
-    "repeated Debian source backup content"
+    "Debian archive keyring symlink source backup content"
   assert_eq "${third_party}" "$(<"${source_dir}/docker.list")" \
-    "repeated Debian third-party source preserved"
+    "Debian archive keyring symlink third-party source preserved"
 )
 
 test_debian_official_source_matrix() (
@@ -586,7 +588,7 @@ test_official_source_early_guards() (
   assert_eq 0 "${apt_update_calls}" "missing keyring apt update count"
   assert_eq "${old_main}" "$(<"${apt_dir}/sources.list")" \
     "missing keyring source unchanged"
-  assert_contains "发行版 APT 密钥环不是可读的普通文件" \
+  assert_contains "发行版 APT 密钥环不存在" \
     "${case_dir}/keyring-output"
   assert_no_source_transaction_files "${apt_dir}"
 
@@ -605,6 +607,68 @@ test_official_source_early_guards() (
   assert_contains "未配置 Ubuntu mips64el 的官方仓库地址" \
     "${case_dir}/architecture-output"
   assert_no_source_transaction_files "${apt_dir}"
+
+  rm -f -- "${root_dir}/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+  printf '%s\n' ubuntu-archive-keyring > \
+    "${root_dir}/usr/share/keyrings/ubuntu-archive-keyring.pgp"
+  ln -s ubuntu-archive-keyring.pgp \
+    "${root_dir}/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+  # shellcheck disable=SC2329
+  dpkg() {
+    [[ "${1:-}" == "--print-architecture" ]] || return 64
+    printf '%s' amd64
+  }
+  if set_system_sources > "${case_dir}/ubuntu-link-output" 2>&1; then
+    fail_test "Ubuntu archive keyring symlink unexpectedly succeeded"
+  fi
+  assert_eq 0 "${apt_update_calls}" "Ubuntu keyring symlink apt update count"
+  assert_eq "${old_main}" "$(<"${apt_dir}/sources.list")" \
+    "Ubuntu keyring symlink source unchanged"
+  assert_contains "Ubuntu APT 密钥环不允许使用符号链接" \
+    "${case_dir}/ubuntu-link-output"
+  assert_no_source_transaction_files "${apt_dir}"
+)
+
+test_debian_archive_keyring_symlink() (
+  local case_dir="${TMP_DIR}/debian-keyring-symlink"
+  local root_dir="${case_dir}/rootfs"
+  local keyring_dir="${root_dir}/usr/share/keyrings"
+  local keyring="${keyring_dir}/debian-archive-keyring.gpg"
+  local keyring_target="${keyring_dir}/debian-archive-keyring.pgp"
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+
+  printf '%s\n' debian-archive-keyring > "${keyring_target}"
+  ln -s debian-archive-keyring.pgp "${keyring}"
+  require_archive_keyring debian ||
+    fail_test "official Debian archive keyring symlink was rejected"
+
+  rm -f -- "${keyring}"
+  ln -s unexpected-keyring.pgp "${keyring}"
+  if require_archive_keyring debian > "${case_dir}/unexpected-link-output" 2>&1; then
+    fail_test "unexpected Debian archive keyring symlink was accepted"
+  fi
+  assert_contains "Debian APT 密钥环不是官方包定义的符号链接" \
+    "${case_dir}/unexpected-link-output"
+
+  rm -f -- "${keyring}" "${keyring_target}"
+  ln -s debian-archive-keyring.pgp "${keyring}"
+  if require_archive_keyring debian > "${case_dir}/broken-link-output" 2>&1; then
+    fail_test "broken Debian archive keyring symlink was accepted"
+  fi
+  assert_contains "Debian APT 密钥环链接目标不是普通文件" \
+    "${case_dir}/broken-link-output"
+
+  printf '%s\n' debian-archive-keyring > "${keyring_dir}/archive-keyring-data"
+  ln -s archive-keyring-data "${keyring_target}"
+  if require_archive_keyring debian > "${case_dir}/target-link-output" 2>&1; then
+    fail_test "nested Debian archive keyring symlink was accepted"
+  fi
+  assert_contains "Debian APT 密钥环链接目标不是普通文件" \
+    "${case_dir}/target-link-output"
 )
 
 test_main_source_mixed_guard() (
@@ -2147,6 +2211,7 @@ test_ubuntu_official_sources
 test_official_source_failure_rollback
 test_official_source_preflight_guards
 test_official_source_early_guards
+test_debian_archive_keyring_symlink
 test_main_source_mixed_guard
 test_disabled_standard_source_is_ignored
 test_source_transaction_interrupt_rollback
