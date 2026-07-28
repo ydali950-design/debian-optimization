@@ -1308,6 +1308,158 @@ test_required_package_commands_fail_closed() (
   done
 )
 
+test_irqbalance_first_install_retry() (
+  local case_dir="${TMP_DIR}/irqbalance-first-install"
+  local install_calls=0 restart_calls=0 failed_systemctl_command="" expected_message
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  write_udp_validator "${case_dir}"
+  load_case "${case_dir}"
+
+  # Invoked by install_irqbalance from the extracted main2 library.
+  # shellcheck disable=SC2329
+  apt-get() {
+    printf 'apt-get %s\n' "$*" >> "${case_dir}/commands.log"
+    install_calls=$((install_calls + 1))
+    [[ "${install_calls}" -ge 2 ]]
+  }
+  # shellcheck disable=SC2329
+  systemctl() {
+    printf 'systemctl %s\n' "$*" >> "${case_dir}/commands.log"
+    return 0
+  }
+
+  : > "${case_dir}/commands.log"
+  install_irqbalance > "${case_dir}/package-retry-output" 2>&1
+  assert_eq 2 "${install_calls}" "irqbalance package retry count"
+  assert_eq 2 "$(grep -Fc 'apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=60 install -y irqbalance' \
+    "${case_dir}/commands.log")" "irqbalance package command count"
+  assert_contains "软件包首次安装未完成，正在自动重试一次" \
+    "${case_dir}/package-retry-output"
+  assert_contains "systemctl daemon-reload" "${case_dir}/commands.log"
+  assert_contains "systemctl enable irqbalance.service" "${case_dir}/commands.log"
+  assert_contains "systemctl restart irqbalance.service" "${case_dir}/commands.log"
+
+  # shellcheck disable=SC2329
+  apt-get() {
+    printf 'apt-get %s\n' "$*" >> "${case_dir}/commands.log"
+    return 1
+  }
+  : > "${case_dir}/commands.log"
+  if install_irqbalance > "${case_dir}/package-failure-output" 2>&1; then
+    fail_test "permanent irqbalance package failure unexpectedly succeeded"
+  fi
+  assert_eq 2 "$(grep -Fc 'apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=60 install -y irqbalance' \
+    "${case_dir}/commands.log")" \
+    "permanent irqbalance package retry count"
+  assert_contains "systemctl daemon-reload" "${case_dir}/commands.log"
+  assert_contains "systemctl reset-failed irqbalance.service" \
+    "${case_dir}/commands.log"
+  assert_not_contains "systemctl enable irqbalance.service" \
+    "${case_dir}/commands.log"
+  assert_not_contains "systemctl restart irqbalance.service" \
+    "${case_dir}/commands.log"
+  assert_contains "irqbalance 软件包连续两次安装失败" \
+    "${case_dir}/package-failure-output"
+
+  # shellcheck disable=SC2329
+  apt-get() {
+    printf 'apt-get %s\n' "$*" >> "${case_dir}/commands.log"
+    return 0
+  }
+  # shellcheck disable=SC2329
+  systemctl() {
+    local command="systemctl $*"
+    printf '%s\n' "${command}" >> "${case_dir}/commands.log"
+    if [[ "${command}" == "systemctl restart irqbalance.service" ]]; then
+      restart_calls=$((restart_calls + 1))
+      [[ "${restart_calls}" -ge 2 ]]
+      return
+    fi
+    return 0
+  }
+  : > "${case_dir}/commands.log"
+  restart_calls=0
+  install_irqbalance > "${case_dir}/service-retry-output" 2>&1
+  assert_eq 2 "${restart_calls}" "irqbalance service retry count"
+  assert_contains "systemctl reset-failed irqbalance.service" \
+    "${case_dir}/commands.log"
+  assert_contains "首次启动未完成，正在清除失败计数并重试一次" \
+    "${case_dir}/service-retry-output"
+
+  # shellcheck disable=SC2329
+  systemctl() {
+    local command="systemctl $*"
+    printf '%s\n' "${command}" >> "${case_dir}/commands.log"
+    case "${command}" in
+      "systemctl restart irqbalance.service")
+        restart_calls=$((restart_calls + 1))
+        return 1
+        ;;
+      "systemctl reset-failed irqbalance.service") return 1 ;;
+      *) return 0 ;;
+    esac
+  }
+  : > "${case_dir}/commands.log"
+  restart_calls=0
+  if install_irqbalance > "${case_dir}/reset-failure-output" 2>&1; then
+    fail_test "irqbalance reset-failed failure unexpectedly succeeded"
+  fi
+  assert_eq 1 "${restart_calls}" "irqbalance reset-failed stops second restart"
+  assert_contains "systemctl reset-failed irqbalance.service" \
+    "${case_dir}/commands.log"
+  assert_contains "无法清除 systemd 失败计数" \
+    "${case_dir}/reset-failure-output"
+
+  # shellcheck disable=SC2329
+  systemctl() {
+    local command="systemctl $*"
+    printf '%s\n' "${command}" >> "${case_dir}/commands.log"
+    if [[ "${command}" == "systemctl restart irqbalance.service" ]]; then
+      restart_calls=$((restart_calls + 1))
+      return 1
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2329
+  journalctl() {
+    printf 'journalctl %s\n' "$*" >> "${case_dir}/commands.log"
+    return 0
+  }
+  : > "${case_dir}/commands.log"
+  restart_calls=0
+  if install_irqbalance > "${case_dir}/service-failure-output" 2>&1; then
+    fail_test "permanent irqbalance service failure unexpectedly succeeded"
+  fi
+  assert_eq 2 "${restart_calls}" "permanent irqbalance service retry count"
+  assert_contains "systemctl status irqbalance.service --no-pager --full" \
+    "${case_dir}/commands.log"
+  assert_contains "journalctl -u irqbalance.service -n 40 --no-pager" \
+    "${case_dir}/commands.log"
+  assert_contains "irqbalance 连续两次启动失败" \
+    "${case_dir}/service-failure-output"
+
+  # shellcheck disable=SC2329
+  systemctl() {
+    local command="systemctl $*"
+    printf '%s\n' "${command}" >> "${case_dir}/commands.log"
+    [[ "${command}" != "${failed_systemctl_command}" ]]
+  }
+  for failed_systemctl_command in \
+    "systemctl daemon-reload" \
+    "systemctl enable irqbalance.service"; do
+    case "${failed_systemctl_command}" in
+      "systemctl daemon-reload") expected_message="systemd 配置刷新失败" ;;
+      "systemctl enable irqbalance.service") expected_message="设置开机启用失败" ;;
+    esac
+    : > "${case_dir}/commands.log"
+    if install_irqbalance > "${case_dir}/systemctl-stage-output" 2>&1; then
+      fail_test "irqbalance systemctl stage failure unexpectedly succeeded"
+    fi
+    assert_contains "${expected_message}" "${case_dir}/systemctl-stage-output"
+  done
+)
+
 test_install_state_validation() (
   local case_dir="${TMP_DIR}/install-state"
   local state_sha newer_version
@@ -2224,6 +2376,7 @@ test_current_udp_is_not_restarted
 test_failed_udp_migration_keeps_pending_marker
 test_default_setup_marker_gate
 test_required_package_commands_fail_closed
+test_irqbalance_first_install_retry
 test_install_state_validation
 test_install_state_atomic_failure
 test_legacy_pending_state_requires_explicit_restart

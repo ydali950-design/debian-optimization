@@ -7,7 +7,7 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 RAW_BASE_URL="${RAW_BASE_URL:-https://raw.githubusercontent.com/ydali950-design/debian-optimization/refs/heads/main}"
 AUTO_UPDATE_SUPPORT="${AUTO_UPDATE_SUPPORT:-0}"
-MAIN2_BUNDLE_VERSION=2026072702
+MAIN2_BUNDLE_VERSION=2026072901
 MAIN2_MANAGED_CONFIG_FORMAT=1
 DEBIAN_ARCHIVE_KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
 DEBIAN_ARCHIVE_KEYRING_LINK_TARGET="debian-archive-keyring.pgp"
@@ -2239,10 +2239,46 @@ run_local_script() {
 }
 
 install_irqbalance() {
+  local install_attempt
   export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y irqbalance || return 1
-  systemctl start irqbalance || return 1
-  systemctl enable irqbalance || return 1
+
+  for install_attempt in 1 2; do
+    if apt-get \
+         -o Acquire::Retries=3 \
+         -o DPkg::Lock::Timeout=60 \
+         install -y irqbalance; then
+      break
+    fi
+    if [[ "${install_attempt}" == "2" ]]; then
+      fail "irqbalance 软件包连续两次安装失败。"
+      return 1
+    fi
+    warn "irqbalance 软件包首次安装未完成，正在自动重试一次。"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed irqbalance.service >/dev/null 2>&1 || true
+  done
+
+  if ! systemctl daemon-reload; then
+    fail "irqbalance 安装完成，但 systemd 配置刷新失败。"
+    return 1
+  fi
+  if ! systemctl enable irqbalance.service; then
+    fail "irqbalance 安装完成，但设置开机启用失败。"
+    return 1
+  fi
+  if ! systemctl restart irqbalance.service; then
+    warn "irqbalance 首次启动未完成，正在清除失败计数并重试一次。"
+    if ! systemctl reset-failed irqbalance.service; then
+      fail "irqbalance 首次启动失败，且无法清除 systemd 失败计数。"
+      return 1
+    fi
+    if ! systemctl restart irqbalance.service; then
+      fail "irqbalance 连续两次启动失败，以下为服务状态和最近日志。"
+      systemctl status irqbalance.service --no-pager --full || true
+      journalctl -u irqbalance.service -n 40 --no-pager || true
+      return 1
+    fi
+  fi
   ok "irqbalance 已安装并启用。"
 }
 

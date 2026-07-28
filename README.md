@@ -127,6 +127,8 @@ chronyc makestep
 # 安装并启用 irqbalance
 ```
 
+`irqbalance` 软件包安装和服务启动分别允许一次受控重试。安装后会显式刷新 systemd，先设置开机启用，再启动服务。最终失败会指出精确阶段；如果服务连续启动失败，还会输出服务状态和最近 40 行日志，不需要再次运行整套脚本才能看清原因。
+
 全新机器上，`main2` 使用独立的 `/etc/sysctl.d/99-network-optimization.conf` 和 `/etc/security/limits.d/99-network-optimization.conf`，不会覆盖现有 `/etc/sysctl.conf` 或 `/etc/security/limits.conf`。
 
 检测到旧版 `main.sh` 产物时，`main2` 会在写入新配置前完成所有权和 UDP 规则校验，然后执行以下迁移：
