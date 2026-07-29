@@ -60,12 +60,20 @@ if [[ "$1" == "-e" && "$2" == "-p" ]]; then
 fi
 
 if [[ "$1" == "-q" && "$2" == "-w" ]]; then
-  value="${3#net.core.netdev_budget_usecs=}"
-  if [[ "${MOCK_SYSCTL_WRITE}" == "accept" ]]; then
-    printf '%s\n' "${value}" > "${MOCK_NETDEV_BUDGET_FILE}"
+  assignment="$3"
+  key="${assignment%%=*}"
+  value="${assignment#*=}"
+  state_file="${MOCK_PROC_SYS_ROOT}/${key//./_}"
+  case "${key}" in
+    net.core.netdev_budget_usecs) write_mode="${MOCK_NETDEV_WRITE}" ;;
+    net.ipv4.ipfrag_high_thresh) write_mode="${MOCK_IPFRAG_WRITE}" ;;
+    *) echo "unexpected mock sysctl key: ${key}" >&2; exit 64 ;;
+  esac
+  if [[ "${write_mode}" == "accept" ]]; then
+    printf '%s\n' "${value}" > "${state_file}"
     exit 0
   fi
-  echo 'sysctl: setting key "net.core.netdev_budget_usecs": Invalid argument' >&2
+  printf 'sysctl: setting key "%s": Invalid argument\n' "${key}" >&2
   exit 1
 fi
 
@@ -228,6 +236,7 @@ test_support_manifest() (
 
   for entry in \
     sysctl_optimization_debian_overwrite_main2.sh:faaaf61b4756dd76548bdcd067653d3aed7a15f812680d13be8777e5f51dcfb9 \
+    sysctl_optimization_debian_overwrite_main2.sh:832b9060a9d7153c74814ded4cbc4b35cc738998b1c2ac43f70de793736ee3ba \
     sysctl_optimization_debian_overwrite_main2.sh:3c182e7aaf39971bb56d00a4e6625ee2e00c3e9d35235fea4f0e9f0488749d4e \
     sysctl_optimization_debian_overwrite_main2.sh:55171030719d1f3ca2a213d57425b1b35d62e6eb9754917335b3469895ba4c3f \
     sysctl_optimization_debian_overwrite_main2.sh:14ec6ab107edf0bae40cfb527fb598b59377f45352ed2f1f4a09e6e2901659cb \
@@ -383,15 +392,16 @@ test_support_script_refresh() {
 
 build_apply_case() {
   local case_dir="$1"
-  local state_file="${case_dir}/netdev_budget_usecs"
+  local proc_root="${case_dir}/proc-sys"
   local sysctl_file="${case_dir}/99-network-optimization.conf"
   local default_file="${case_dir}/network-optimization-sysctl"
 
+  install -d "${proc_root}"
   printf '%s\n' '# test sysctl file' > "${sysctl_file}"
   awk \
     -v sysctl_file="${sysctl_file}" \
     -v default_file="${default_file}" \
-    -v state_file="${state_file}" '
+    -v proc_root="${proc_root}" '
       /^SYSCTL_FILE=/ {
         print "SYSCTL_FILE=\"" sysctl_file "\""
         next
@@ -400,36 +410,71 @@ build_apply_case() {
         print "SYSCTL_DEFAULT_FILE=\"" default_file "\""
         next
       }
-      /local proc_file="\/proc\/sys\/net\/core\/netdev_budget_usecs"/ {
-        print "  local proc_file=\"" state_file "\""
+      /local proc_file="\/proc\/sys\// {
+        print "  local proc_file=\"" proc_root "/${key//./_}\""
         next
       }
       { print }
-      $0 == "apply_netdev_budget_usecs" { print "exit 0" }
+      $0 == "apply_optional_numeric_sysctl net.ipv4.ipfrag_high_thresh \"${IPFRAG_HIGH_THRESH}\"" {
+        print "exit 0"
+      }
     ' "${TMP_DIR}/apply-base.sh" > "${case_dir}/apply.sh"
   chmod 0755 "${case_dir}/apply.sh"
 }
 
 run_apply_case() {
   local name="$1"
-  local current="$2"
-  local requested="$3"
-  local write_mode="$4"
+  local netdev_current="$2"
+  local netdev_requested="$3"
+  local netdev_write="$4"
+  local ipfrag_current="$5"
+  local ipfrag_requested="$6"
+  local ipfrag_write="$7"
   local case_dir="${TMP_DIR}/${name}"
 
   install -d "${case_dir}"
   build_apply_case "${case_dir}"
   printf '%s\n' \
     'NF_CONNTRACK_HASH_SIZE=65536' \
-    "NETDEV_BUDGET_USECS=${requested}" > "${case_dir}/network-optimization-sysctl"
-  if [[ "${current}" != "missing" ]]; then
-    printf '%s\n' "${current}" > "${case_dir}/netdev_budget_usecs"
+    "NETDEV_BUDGET_USECS=${netdev_requested}" \
+    "IPFRAG_HIGH_THRESH=${ipfrag_requested}" > "${case_dir}/network-optimization-sysctl"
+  if [[ "${netdev_current}" != "missing" ]]; then
+    printf '%s\n' "${netdev_current}" > "${case_dir}/proc-sys/net_core_netdev_budget_usecs"
+  fi
+  if [[ "${ipfrag_current}" != "missing" ]]; then
+    printf '%s\n' "${ipfrag_current}" > "${case_dir}/proc-sys/net_ipv4_ipfrag_high_thresh"
   fi
 
   PATH="${TMP_DIR}/bin:${PATH}" \
-    MOCK_SYSCTL_WRITE="${write_mode}" \
-    MOCK_NETDEV_BUDGET_FILE="${case_dir}/netdev_budget_usecs" \
+    MOCK_PROC_SYS_ROOT="${case_dir}/proc-sys" \
+    MOCK_NETDEV_WRITE="${netdev_write}" \
+    MOCK_IPFRAG_WRITE="${ipfrag_write}" \
     bash "${case_dir}/apply.sh" > "${case_dir}/output" 2>&1
+}
+
+run_invalid_config_case() {
+  local name="$1"
+  local netdev_requested="$2"
+  local ipfrag_requested="$3"
+  local expected_message="$4"
+  local case_dir="${TMP_DIR}/${name}"
+
+  install -d "${case_dir}"
+  build_apply_case "${case_dir}"
+  printf '%s\n' \
+    'NF_CONNTRACK_HASH_SIZE=65536' \
+    "NETDEV_BUDGET_USECS=${netdev_requested}" \
+    "IPFRAG_HIGH_THRESH=${ipfrag_requested}" > "${case_dir}/network-optimization-sysctl"
+  printf '%s\n' 8000 > "${case_dir}/proc-sys/net_core_netdev_budget_usecs"
+  printf '%s\n' 4194304 > "${case_dir}/proc-sys/net_ipv4_ipfrag_high_thresh"
+  if PATH="${TMP_DIR}/bin:${PATH}" \
+     MOCK_PROC_SYS_ROOT="${case_dir}/proc-sys" \
+     MOCK_NETDEV_WRITE=accept \
+     MOCK_IPFRAG_WRITE=accept \
+     bash "${case_dir}/apply.sh" > "${case_dir}/output" 2>&1; then
+    fail "invalid optional sysctl config unexpectedly succeeded: ${name}"
+  fi
+  assert_contains "${expected_message}" "${case_dir}/output"
 }
 
 extract_apply_script
@@ -445,9 +490,15 @@ awk '
   capture { print }
 ' "${OPTIMIZER}" > "${TMP_DIR}/persistent-sysctl"
 assert_not_contains 'net.core.netdev_budget_usecs =' "${TMP_DIR}/persistent-sysctl"
+assert_not_contains 'net.ipv4.ipfrag_high_thresh =' "${TMP_DIR}/persistent-sysctl"
 # shellcheck disable=SC2016
 assert_contains 'NETDEV_BUDGET_USECS=${NETDEV_BUDGET_USECS}' "${OPTIMIZER}"
+# shellcheck disable=SC2016
+assert_contains 'IPFRAG_HIGH_THRESH=${IPFRAG_HIGH_THRESH}' "${OPTIMIZER}"
 assert_contains 'managed["net.core.netdev_budget_usecs"] = 1' "${OPTIMIZER}"
+assert_contains 'managed["net.ipv4.ipfrag_high_thresh"] = 1' "${OPTIMIZER}"
+assert_contains 'systemctl status network-optimization-sysctl.service --no-pager --full' "${OPTIMIZER}"
+assert_contains 'journalctl -u network-optimization-sysctl.service -n 120 --no-pager' "${OPTIMIZER}"
 # shellcheck disable=SC2016
 assert_contains 'NETDEV_BUDGET_USECS="${NETDEV_BUDGET_USECS:-2000}"' "${OPTIMIZER}"
 # shellcheck disable=SC2016
@@ -458,7 +509,7 @@ assert_contains '14ec6ab107edf0bae40cfb527fb598b59377f45352ed2f1f4a09e6e2901659c
 assert_contains '55171030719d1f3ca2a213d57425b1b35d62e6eb9754917335b3469895ba4c3f' "${MAIN2}"
 assert_contains '3c182e7aaf39971bb56d00a4e6625ee2e00c3e9d35235fea4f0e9f0488749d4e' "${MAIN2}"
 assert_contains 'faaaf61b4756dd76548bdcd067653d3aed7a15f812680d13be8777e5f51dcfb9' "${MAIN2}"
-assert_eq 832b9060a9d7153c74814ded4cbc4b35cc738998b1c2ac43f70de793736ee3ba \
+assert_eq e17483af3315ae46b308075923e404f7c1698c1e4014779f27451a393136688d \
   "$(sha256sum "${REPO_DIR}/sysctl_optimization_debian_overwrite_main2.sh" | awk '{print $1}')" \
   'optimizer manifest hash'
 assert_eq 41c053c9a310fdb5de36832a5ee58fabee7e4e39e7ab5e60747b40e09f8bc28e \
@@ -474,37 +525,45 @@ assert_eq b1b3b3e93aa4353572e1c1d4c20835a243884978f76aeca4eb6b5b7d0b5c14f6 \
   "$(sha256sum "${REPO_DIR}/scripts/mtu_mss_main2.sh" | awk '{print $1}')" \
   'MTU/MSS manifest hash'
 
-run_apply_case rejected 8000 2000 reject
-assert_eq 8000 "$(<"${TMP_DIR}/rejected/netdev_budget_usecs")" 'rejected target preserves current value'
+run_apply_case rejected 8000 2000 reject 4194304 67108864 reject
+assert_eq 8000 "$(<"${TMP_DIR}/rejected/proc-sys/net_core_netdev_budget_usecs")" \
+  'rejected netdev target preserves current value'
 assert_contains 'Warning: failed to apply net.core.netdev_budget_usecs=2000; keeping current=8000.' "${TMP_DIR}/rejected/output"
+assert_eq 4194304 "$(<"${TMP_DIR}/rejected/proc-sys/net_ipv4_ipfrag_high_thresh")" \
+  'rejected ipfrag target preserves current value'
+assert_contains 'Warning: failed to apply net.ipv4.ipfrag_high_thresh=67108864; keeping current=4194304.' \
+  "${TMP_DIR}/rejected/output"
 assert_contains 'Invalid argument' "${TMP_DIR}/rejected/output"
 
-run_apply_case accepted 2000 4000 accept
-assert_eq 4000 "$(<"${TMP_DIR}/accepted/netdev_budget_usecs")" 'accepted target is applied'
+run_apply_case accepted 2000 4000 accept 4194304 33554432 accept
+assert_eq 4000 "$(<"${TMP_DIR}/accepted/proc-sys/net_core_netdev_budget_usecs")" \
+  'accepted netdev target is applied'
+assert_eq 33554432 "$(<"${TMP_DIR}/accepted/proc-sys/net_ipv4_ipfrag_high_thresh")" \
+  'accepted ipfrag target is applied'
 
 PATH="${TMP_DIR}/bin:${PATH}" \
-  MOCK_SYSCTL_WRITE=reject \
-  MOCK_NETDEV_BUDGET_FILE="${TMP_DIR}/accepted/netdev_budget_usecs" \
+  MOCK_PROC_SYS_ROOT="${TMP_DIR}/accepted/proc-sys" \
+  MOCK_NETDEV_WRITE=reject \
+  MOCK_IPFRAG_WRITE=reject \
   bash "${TMP_DIR}/accepted/apply.sh" > "${TMP_DIR}/accepted/output-second" 2>&1
-assert_eq 4000 "$(<"${TMP_DIR}/accepted/netdev_budget_usecs")" 'second apply remains idempotent'
+assert_eq 4000 "$(<"${TMP_DIR}/accepted/proc-sys/net_core_netdev_budget_usecs")" \
+  'second netdev apply remains idempotent'
+assert_eq 33554432 "$(<"${TMP_DIR}/accepted/proc-sys/net_ipv4_ipfrag_high_thresh")" \
+  'second ipfrag apply remains idempotent'
 assert_not_contains 'failed to apply net.core.netdev_budget_usecs' "${TMP_DIR}/accepted/output-second"
+assert_not_contains 'failed to apply net.ipv4.ipfrag_high_thresh' "${TMP_DIR}/accepted/output-second"
 
-run_apply_case unavailable missing 2000 reject
+run_apply_case unavailable missing 2000 reject missing 33554432 reject
 assert_contains 'Warning: net.core.netdev_budget_usecs is unavailable; keeping the running kernel defaults.' "${TMP_DIR}/unavailable/output"
+assert_contains 'Warning: net.ipv4.ipfrag_high_thresh is unavailable; keeping the running kernel defaults.' \
+  "${TMP_DIR}/unavailable/output"
 assert_not_contains 'Invalid argument' "${TMP_DIR}/unavailable/output"
 
-install -d "${TMP_DIR}/invalid"
-build_apply_case "${TMP_DIR}/invalid"
-printf '%s\n' \
-  'NF_CONNTRACK_HASH_SIZE=65536' \
-  'NETDEV_BUDGET_USECS=2147483648' > "${TMP_DIR}/invalid/network-optimization-sysctl"
-printf '%s\n' 8000 > "${TMP_DIR}/invalid/netdev_budget_usecs"
-if PATH="${TMP_DIR}/bin:${PATH}" \
-   MOCK_SYSCTL_WRITE=accept \
-   MOCK_NETDEV_BUDGET_FILE="${TMP_DIR}/invalid/netdev_budget_usecs" \
-   bash "${TMP_DIR}/invalid/apply.sh" > "${TMP_DIR}/invalid/output" 2>&1; then
-  fail 'out-of-range NETDEV_BUDGET_USECS unexpectedly succeeded'
-fi
-assert_contains 'Invalid NETDEV_BUDGET_USECS=2147483648' "${TMP_DIR}/invalid/output"
+run_invalid_config_case invalid-netdev-range 2147483648 33554432 \
+  'Invalid NETDEV_BUDGET_USECS=2147483648'
+run_invalid_config_case invalid-ipfrag-text 2000 not-a-number \
+  'Invalid IPFRAG_HIGH_THRESH=not-a-number'
+run_invalid_config_case invalid-ipfrag-range 2000 2147483648 \
+  'Invalid IPFRAG_HIGH_THRESH=2147483648'
 
-echo 'PASS: main2 netdev_budget_usecs runtime fallback'
+echo 'PASS: main2 optional numeric sysctl runtime fallback'

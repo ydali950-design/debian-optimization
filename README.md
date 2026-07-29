@@ -129,6 +129,8 @@ chronyc makestep
 
 `irqbalance` 软件包安装和服务启动分别允许一次受控重试。安装后会显式刷新 systemd，先设置开机启用，再启动服务。最终失败会指出精确阶段；如果服务连续启动失败，还会输出服务状态和最近 40 行日志，不需要再次运行整套脚本才能看清原因。
 
+网络优化仍会严格校验转发、IPv6 关闭等必要参数。`net.core.netdev_budget_usecs` 和 `net.ipv4.ipfrag_high_thresh` 在不同云厂商内核上的可接受范围不一致，因此改为运行期探测：内核接受时应用目标值，明确拒绝时保留当前内核值并继续完成其余优化，不会再让整个服务失败。`network-optimization-sysctl.service` 首次启动失败时会清除该服务失败状态并重试一次；最终失败会输出完整服务状态和最近 120 行日志，其他 sysctl 错误不会被忽略。
+
 全新机器上，`main2` 使用独立的 `/etc/sysctl.d/99-network-optimization.conf` 和 `/etc/security/limits.d/99-network-optimization.conf`，不会覆盖现有 `/etc/sysctl.conf` 或 `/etc/security/limits.conf`。
 
 检测到旧版 `main.sh` 产物时，`main2` 会在写入新配置前完成所有权和 UDP 规则校验，然后执行以下迁移：
@@ -145,7 +147,7 @@ chronyc makestep
 LEGACY_BACKUP_SUFFIX=20260725013000 bash main2.sh
 ```
 
-首次初始化成功后会创建 `/root/.debian_optimization_main2_done`，并在 `/var/lib/debian-optimization-main2/install-state` 精确记录已安装版本、已应用版本、脚本 SHA256、管理文件整体 SHA256，以及 `PROFILE`、`ENABLE_NIC_TUNING`、`RP_FILTER`、`MAXIMIZE_NIC_RING`、`IP_LOCAL_PORT_RANGE` 和优化器支持的 14 个数值性能覆盖项。再次执行相同版本时直接进入菜单；覆盖为新版本后，会按记录值重新应用网络优化，不会把已经选择的 `max` 或自定义缓冲区、队列、连接跟踪等参数恢复成默认值。首次应用或普通版本更新在中途失败时，同一份 `main2.sh` 会按上次记录参数续跑；换成另一份脚本时不会接管旧事务。
+首次初始化成功后会创建 `/root/.debian_optimization_main2_done`，并在 `/var/lib/debian-optimization-main2/install-state` 精确记录已安装版本、已应用版本、脚本 SHA256、管理文件整体 SHA256，以及 `PROFILE`、`ENABLE_NIC_TUNING`、`RP_FILTER`、`MAXIMIZE_NIC_RING`、`IP_LOCAL_PORT_RANGE` 和优化器支持的 14 个数值性能覆盖项。再次执行相同版本时直接进入菜单；覆盖为新版本后，会按记录值重新应用网络优化，不会把已经选择的 `max` 或自定义缓冲区、队列、连接跟踪等参数恢复成默认值。首次应用或普通版本更新在中途失败时会按上次记录参数续跑；新版 `main2.sh` 仅在状态明确记录“不需要人工文件覆盖”时接管旧版本的未完成事务。覆盖条件未知或需要人工覆盖授权时仍会在任何系统调用前停止。
 
 自动重应用前会核对 main2 管理的 sysctl、limits、systemd 服务和网卡调优文件。任一文件被人工修改、替换或改成符号链接时，只更新脚本包并保留现有系统配置。确认允许覆盖后再明确执行：
 
@@ -167,7 +169,7 @@ REAPPLY_INIT=1 PROFILE=max bash main2.sh
 
 在 Ubuntu 上，`amd64`、`i386` 使用官方 `archive.ubuntu.com/ubuntu` 和 `security.ubuntu.com/ubuntu`；`arm64`、`armhf`、`ppc64el`、`riscv64`、`s390x` 使用官方 `ports.ubuntu.com/ubuntu-ports`。每条源都精确绑定 `/usr/share/keyrings/ubuntu-archive-keyring.gpg` 并限制为当前原生架构，避免 foreign architecture 从错误端点请求索引。
 
-切换前，脚本会备份 `/etc/apt/sources.list`，停用单独文件中的旧系统源，并保留独立 `.list` 或 `.sources` 文件中的第三方仓库。deb822 文件即使使用非标准文件名或云厂商镜像，也会根据当前系统代号和发行版密钥环识别并停用；只含 `Enabled: no` 的文件保持不动。主源含无法确认归属的活动仓库、同一扩展源文件混合系统源与第三方源、目标是符号链接或其他非普通文件时，脚本会在修改前停止，要求先拆分配置。
+切换前，脚本会备份 `/etc/apt/sources.list`，停用单独文件中的旧系统源，并保留独立 `.list` 或 `.sources` 文件中的第三方仓库。停用备份始终以 `.disabled` 结尾，APT 会安静忽略；覆盖更新时会把旧版生成的 `.disabled.<14 位时间戳>[.<序号>]` 文件迁移为以 `.disabled` 结尾的新命名，内容不变且不覆盖已有备份。deb822 文件即使使用非标准文件名或云厂商镜像，也会根据当前系统代号和发行版密钥环识别并停用；只含 `Enabled: no` 的文件保持不动。主源含无法确认归属的活动仓库、同一扩展源文件混合系统源与第三方源、目标是符号链接或其他非普通文件时，脚本会在修改前停止，要求先拆分配置。
 
 新官方源写入后会立即执行 `apt-get update`。刷新失败或切换事务收到 `INT`、`TERM`、异常退出时，`main2.sh` 会恢复执行前的主源和扩展源；普通刷新失败还会用恢复后的配置重新刷新。同一秒重复执行也不会覆盖已有备份。菜单 `2` 可以随时重新设置当前系统官方源。
 

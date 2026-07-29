@@ -14,6 +14,17 @@ fail_test() {
   exit 1
 }
 
+create_test_symlink() {
+  local target="$1"
+  local link="$2"
+  if [[ "${OSTYPE:-}" == "cygwin" ]]; then
+    MSYS=winsymlinks:sys ln -s -- "${target}" "${link}"
+  else
+    ln -s -- "${target}" "${link}"
+  fi
+  [[ -L "${link}" ]] || fail_test "failed to create test symlink: ${link}"
+}
+
 assert_eq() {
   local expected="$1"
   local actual="$2"
@@ -196,7 +207,8 @@ write_test_archive_keyring() {
 
 assert_no_source_transaction_files() {
   local apt_dir="$1"
-  if find "${apt_dir}" -name '.main2-*-sources.*' -o -name '*.disabled.*' | grep -q .; then
+  if find "${apt_dir}" \( -name '.main2-*-sources.*' -o -name '*.disabled' -o -name '*.disabled.*' \) |
+     grep -q .; then
     fail_test "source transaction files remain under ${apt_dir}"
   fi
 }
@@ -266,7 +278,7 @@ deb [signed-by=${archive_keyring}] http://security.debian.org/debian-security bo
     "new Debian source backup content"
   assert_missing "${source_dir}/debian.sources"
   assert_eq "${old_dropin}" \
-    "$(<"${source_dir}/debian.sources.disabled.20260727010101")" \
+    "$(<"${source_dir}/debian.sources.20260727010101.disabled")" \
     "disabled Debian source content"
   assert_eq "${third_party}" "$(<"${source_dir}/docker.list")" \
     "Debian third-party source preserved"
@@ -275,7 +287,7 @@ deb [signed-by=${archive_keyring}] http://security.debian.org/debian-security bo
   fi
 
   mv -- "${archive_keyring}" "${archive_keyring%.gpg}.pgp"
-  ln -s debian-archive-keyring.pgp "${archive_keyring}"
+  create_test_symlink debian-archive-keyring.pgp "${archive_keyring}"
   set_system_sources > "${case_dir}/repeat-output" 2>&1
   assert_eq 2 "$(line_count "${apt_update_log}")" \
     "Debian archive keyring symlink apt update count"
@@ -409,15 +421,15 @@ deb [arch=${architecture} signed-by=${archive_keyring}] http://ports.ubuntu.com/
         "Ubuntu ${architecture} source backup"
       assert_missing "${source_dir}/ubuntu.sources"
       assert_eq "${old_dropin}" \
-        "$(<"${source_dir}/ubuntu.sources.disabled.20260727020202")" \
+        "$(<"${source_dir}/ubuntu.sources.20260727020202.disabled")" \
         "Ubuntu ${architecture} disabled system source"
       assert_missing "${source_dir}/regional.sources"
       assert_eq "${regional_source}" \
-        "$(<"${source_dir}/regional.sources.disabled.20260727020202")" \
+        "$(<"${source_dir}/regional.sources.20260727020202.disabled")" \
         "Ubuntu ${architecture} disabled nonstandard system source"
       assert_missing "${source_dir}/regional.list"
       assert_eq "${regional_list}" \
-        "$(<"${source_dir}/regional.list.disabled.20260727020202")" \
+        "$(<"${source_dir}/regional.list.20260727020202.disabled")" \
         "Ubuntu ${architecture} disabled nonstandard list source"
       assert_eq "${third_party}" "$(<"${source_dir}/ppa.list")" \
         "Ubuntu ${architecture} third-party source preserved"
@@ -611,7 +623,7 @@ test_official_source_early_guards() (
   rm -f -- "${root_dir}/usr/share/keyrings/ubuntu-archive-keyring.gpg"
   printf '%s\n' ubuntu-archive-keyring > \
     "${root_dir}/usr/share/keyrings/ubuntu-archive-keyring.pgp"
-  ln -s ubuntu-archive-keyring.pgp \
+  create_test_symlink ubuntu-archive-keyring.pgp \
     "${root_dir}/usr/share/keyrings/ubuntu-archive-keyring.gpg"
   # shellcheck disable=SC2329
   dpkg() {
@@ -642,12 +654,12 @@ test_debian_archive_keyring_symlink() (
   . "${case_dir}/main2-library.sh"
 
   printf '%s\n' debian-archive-keyring > "${keyring_target}"
-  ln -s debian-archive-keyring.pgp "${keyring}"
+  create_test_symlink debian-archive-keyring.pgp "${keyring}"
   require_archive_keyring debian ||
     fail_test "official Debian archive keyring symlink was rejected"
 
   rm -f -- "${keyring}"
-  ln -s unexpected-keyring.pgp "${keyring}"
+  create_test_symlink unexpected-keyring.pgp "${keyring}"
   if require_archive_keyring debian > "${case_dir}/unexpected-link-output" 2>&1; then
     fail_test "unexpected Debian archive keyring symlink was accepted"
   fi
@@ -655,7 +667,7 @@ test_debian_archive_keyring_symlink() (
     "${case_dir}/unexpected-link-output"
 
   rm -f -- "${keyring}" "${keyring_target}"
-  ln -s debian-archive-keyring.pgp "${keyring}"
+  create_test_symlink debian-archive-keyring.pgp "${keyring}"
   if require_archive_keyring debian > "${case_dir}/broken-link-output" 2>&1; then
     fail_test "broken Debian archive keyring symlink was accepted"
   fi
@@ -663,7 +675,7 @@ test_debian_archive_keyring_symlink() (
     "${case_dir}/broken-link-output"
 
   printf '%s\n' debian-archive-keyring > "${keyring_dir}/archive-keyring-data"
-  ln -s archive-keyring-data "${keyring_target}"
+  create_test_symlink archive-keyring-data "${keyring_target}"
   if require_archive_keyring debian > "${case_dir}/target-link-output" 2>&1; then
     fail_test "nested Debian archive keyring symlink was accepted"
   fi
@@ -740,6 +752,33 @@ test_disabled_standard_source_is_ignored() (
     "disabled standard source preserved"
   assert_contains 'deb [arch=amd64 signed-by=' "${apt_dir}/sources.list"
   assert_no_source_transaction_files "${apt_dir}"
+)
+
+test_legacy_disabled_source_backup_migration() (
+  local case_dir="${TMP_DIR}/legacy-disabled-source-backups"
+  local root_dir="${case_dir}/rootfs"
+  local source_dir="${root_dir}/etc/apt/sources.list.d"
+
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  # shellcheck disable=SC1090,SC1091
+  . "${case_dir}/main2-library.sh"
+  install -d "${source_dir}"
+  printf '%s\n' old-debian > "${source_dir}/debian.sources.disabled.20260729162641"
+  printf '%s\n' old-security > "${source_dir}/security.list.disabled.20260729162641.2"
+  printf '%s\n' existing > "${source_dir}/debian.sources.20260729162641.disabled"
+
+  prepare_apt_source_directories > "${case_dir}/output" 2>&1
+
+  assert_missing "${source_dir}/debian.sources.disabled.20260729162641"
+  assert_missing "${source_dir}/security.list.disabled.20260729162641.2"
+  assert_eq existing "$(<"${source_dir}/debian.sources.20260729162641.disabled")" \
+    "existing quiet Debian backup preserved"
+  assert_eq old-debian "$(<"${source_dir}/debian.sources.20260729162641.1.disabled")" \
+    "legacy Debian backup migrated without overwrite"
+  assert_eq old-security "$(<"${source_dir}/security.list.20260729162641.2.disabled")" \
+    "legacy list backup index preserved"
+  assert_contains "已迁移旧版 APT 停用源备份" "${case_dir}/output"
 )
 
 test_source_transaction_interrupt_rollback() (
@@ -1559,6 +1598,40 @@ EOF
   assert_contains "main2 安装状态不是普通文件" "${case_dir}/nonregular-output"
 )
 
+test_install_state_optional_sysctl_limits() (
+  local case_dir="${TMP_DIR}/install-state-optional-sysctl-limits"
+  install -d "${case_dir}"
+  build_main2_library "${case_dir}"
+  write_udp_validator "${case_dir}"
+  load_case "${case_dir}"
+  initialize_main2_state
+  INSTALLED_BUNDLE_VERSION="${MAIN2_BUNDLE_VERSION}"
+  INSTALLED_BUNDLE_MAIN2_SHA256="${CURRENT_MAIN2_SHA256}"
+  PENDING_MAIN2_VERSION="${MAIN2_BUNDLE_VERSION}"
+  PENDING_MAIN2_SHA256="${CURRENT_MAIN2_SHA256}"
+  PENDING_REQUIRES_MANAGED_OVERWRITE=0
+  store_requested_settings balanced
+
+  STORED_NETDEV_BUDGET_USECS=2147483647
+  STORED_IPFRAG_HIGH_THRESH=2147483647
+  validate_install_state_values || fail_test "maximum optional sysctl state was rejected"
+
+  STORED_NETDEV_BUDGET_USECS=2147483648
+  if validate_install_state_values; then
+    fail_test "out-of-range stored NETDEV_BUDGET_USECS unexpectedly succeeded"
+  fi
+  # Consumed by validate_install_state_values from the dynamically built library.
+  # shellcheck disable=SC2034
+  STORED_NETDEV_BUDGET_USECS=2147483647
+
+  # Consumed by validate_install_state_values from the dynamically built library.
+  # shellcheck disable=SC2034
+  STORED_IPFRAG_HIGH_THRESH=2147483648
+  if validate_install_state_values; then
+    fail_test "out-of-range stored IPFRAG_HIGH_THRESH unexpectedly succeeded"
+  fi
+)
+
 test_install_state_atomic_failure() (
   local case_dir="${TMP_DIR}/install-state-atomic"
   local state_dir
@@ -2114,6 +2187,9 @@ EOF
   assert_contains "按上次记录参数继续重试" "${case_dir}/ordinary-failure-output"
 
   rm -f "${case_dir}/fail-apply"
+  PENDING_MAIN2_VERSION="${previous_version}"
+  PENDING_MAIN2_SHA256="${state_sha}"
+  write_install_state
   # Read by initialize_main2_state from the extracted main2 library.
   # shellcheck disable=SC2034
   MAIN2_STATE_LOADED=0
@@ -2122,7 +2198,8 @@ EOF
   : > "${case_dir}/order.log"
   default_setup > "${case_dir}/ordinary-retry-output" 2>&1
   assert_eq $'sources\nbase\nchrony\nirqbalance\noptimizer:1:max:0:444\noptimizer:0:max:0:444' \
-    "$(<"${case_dir}/order.log")" "ordinary pending update retry order"
+    "$(<"${case_dir}/order.log")" "older ordinary pending update retry order"
+  assert_contains "旧 main2 版本未完成" "${case_dir}/ordinary-retry-output"
   assert_contains "PENDING_VERSION=0" "${MAIN2_INSTALL_STATE_FILE}"
   assert_contains "PENDING_REQUIRES_MANAGED_OVERWRITE=0" "${MAIN2_INSTALL_STATE_FILE}"
 )
@@ -2158,6 +2235,7 @@ EOF
   cat > "${legacy_file}" <<'EOF'
 # Debian relay / VPN landing host balanced-max network optimization.
 net.ipv4.ip_forward = 1
+net.ipv4.ipfrag_high_thresh = 67108864
 net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
 net.ipv6.conf.all.accept_source_route = 0
@@ -2174,6 +2252,7 @@ EOF
 
   migrate_legacy_sysctl
   assert_not_contains "net.ipv4.ip_forward" "${legacy_file}"
+  assert_not_contains "net.ipv4.ipfrag_high_thresh" "${legacy_file}"
   assert_not_contains "net.ipv6." "${legacy_file}"
   assert_contains "kernel.pid_max = 4194304" "${legacy_file}"
   assert_file "${legacy_file}.bak.TESTSTAMP"
@@ -2251,12 +2330,35 @@ test_optimizer_owned_path_preflight() (
     > "${SYSCTL_FILE}"
   preflight_managed_paths
 
+  printf '%s\n' \
+    'NF_CONNTRACK_HASH_SIZE=65536' \
+    'NETDEV_BUDGET_USECS=2000' > "${SYSCTL_DEFAULT_FILE}"
+  preflight_managed_paths
+  printf '%s\n' \
+    'NF_CONNTRACK_HASH_SIZE=65536' \
+    'NETDEV_BUDGET_USECS=2000' \
+    'IPFRAG_HIGH_THRESH=33554432' > "${SYSCTL_DEFAULT_FILE}"
+  preflight_managed_paths
+  printf '%s\n' \
+    'NF_CONNTRACK_HASH_SIZE=65536' \
+    'NETDEV_BUDGET_USECS=2000' \
+    'IPFRAG_HIGH_THRESH=invalid' > "${SYSCTL_DEFAULT_FILE}"
+  if (preflight_managed_paths) > "${case_dir}/invalid-sysctl-default-output" 2>&1; then
+    fail_test "invalid main2 sysctl default unexpectedly passed preflight"
+  fi
+  assert_contains "not generated by the legacy script or main2" \
+    "${case_dir}/invalid-sysctl-default-output"
+  printf '%s\n' \
+    'NF_CONNTRACK_HASH_SIZE=65536' \
+    'NETDEV_BUDGET_USECS=2000' \
+    'IPFRAG_HIGH_THRESH=33554432' > "${SYSCTL_DEFAULT_FILE}"
+
   awk '
     $0 == "cat > \"${SYSCTL_APPLY_SCRIPT}\" <<\047EOF\047" { capture = 1; next }
     capture && $0 == "EOF" { exit }
     capture { print }
   ' "${OPTIMIZER}" > "${SYSCTL_APPLY_SCRIPT}"
-  assert_eq 999c4866911e98c7a61e6f7ba98d175d5224f4dcca93a251b8a0ced10ceb029b \
+  assert_eq bc18c4ec894173bc0d696ab41982b2ff232f0d886c05a14b22dd7a89b6f36d06 \
     "$(sha256sum "${SYSCTL_APPLY_SCRIPT}" | awk '{print $1}')" \
     "current generated sysctl apply script hash"
 
@@ -2366,6 +2468,7 @@ test_official_source_early_guards
 test_debian_archive_keyring_symlink
 test_main_source_mixed_guard
 test_disabled_standard_source_is_ignored
+test_legacy_disabled_source_backup_migration
 test_source_transaction_interrupt_rollback
 test_source_move_interrupt_rollback
 test_source_rollback_ignores_second_signal
@@ -2378,6 +2481,7 @@ test_default_setup_marker_gate
 test_required_package_commands_fail_closed
 test_irqbalance_first_install_retry
 test_install_state_validation
+test_install_state_optional_sysctl_limits
 test_install_state_atomic_failure
 test_legacy_pending_state_requires_explicit_restart
 test_saved_settings_restore_and_edit_guard

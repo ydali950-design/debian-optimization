@@ -7,7 +7,7 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 RAW_BASE_URL="${RAW_BASE_URL:-https://raw.githubusercontent.com/ydali950-design/debian-optimization/refs/heads/main}"
 AUTO_UPDATE_SUPPORT="${AUTO_UPDATE_SUPPORT:-0}"
-MAIN2_BUNDLE_VERSION=2026072901
+MAIN2_BUNDLE_VERSION=2026072902
 MAIN2_MANAGED_CONFIG_FORMAT=1
 DEBIAN_ARCHIVE_KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
 DEBIAN_ARCHIVE_KEYRING_LINK_TARGET="debian-archive-keyring.pgp"
@@ -189,7 +189,7 @@ download_file() {
 support_script_expected_sha256() {
   local path="$1"
   case "${path}" in
-    sysctl_optimization_debian_overwrite_main2.sh) printf '%s' 832b9060a9d7153c74814ded4cbc4b35cc738998b1c2ac43f70de793736ee3ba ;;
+    sysctl_optimization_debian_overwrite_main2.sh) printf '%s' e17483af3315ae46b308075923e404f7c1698c1e4014779f27451a393136688d ;;
     scripts/swap.sh) printf '%s' 41c053c9a310fdb5de36832a5ee58fabee7e4e39e7ab5e60747b40e09f8bc28e ;;
     scripts/ssh_root.sh) printf '%s' 8835074f48a8d5ebe50d7a723dccfd03245f245f44ea0fc73be2313d4440f9ae ;;
     scripts/udp_multinic_main2.sh) printf '%s' 374d98155e6a26415418274663a291369017302693246101aa89eaf402d88b44 ;;
@@ -206,6 +206,7 @@ support_script_is_repository_version() {
   fi
   case "${path}:${actual}" in
     sysctl_optimization_debian_overwrite_main2.sh:faaaf61b4756dd76548bdcd067653d3aed7a15f812680d13be8777e5f51dcfb9|\
+    sysctl_optimization_debian_overwrite_main2.sh:832b9060a9d7153c74814ded4cbc4b35cc738998b1c2ac43f70de793736ee3ba|\
     sysctl_optimization_debian_overwrite_main2.sh:3c182e7aaf39971bb56d00a4e6625ee2e00c3e9d35235fea4f0e9f0488749d4e|\
     sysctl_optimization_debian_overwrite_main2.sh:55171030719d1f3ca2a213d57425b1b35d62e6eb9754917335b3469895ba4c3f|\
     sysctl_optimization_debian_overwrite_main2.sh:14ec6ab107edf0bae40cfb527fb598b59377f45352ed2f1f4a09e6e2901659cb|\
@@ -885,6 +886,54 @@ unique_source_backup_path() {
   printf '%s' "${result}"
 }
 
+unique_disabled_source_path() {
+  local path="$1"
+  local stamp="$2"
+  local result="${path}.${stamp}.disabled"
+  local index=0
+
+  while [[ -e "${result}" || -L "${result}" ]]; do
+    index=$((index + 1))
+    result="${path}.${stamp}.${index}.disabled"
+  done
+  printf '%s' "${result}"
+}
+
+migrate_legacy_disabled_source_files() {
+  local source_dir="$1"
+  local file basename source_name stamp old_index target
+  local -a legacy_files=()
+
+  shopt -s nullglob
+  legacy_files=("${source_dir}"/*.list.disabled.* "${source_dir}"/*.sources.disabled.*)
+  shopt -u nullglob
+
+  for file in "${legacy_files[@]}"; do
+    basename="${file##*/}"
+    if [[ ! "${basename}" =~ ^(.+\.(list|sources))\.disabled\.([0-9]{14})(\.([1-9][0-9]*))?$ ]]; then
+      continue
+    fi
+    source_name="${BASH_REMATCH[1]}"
+    stamp="${BASH_REMATCH[3]}"
+    old_index="${BASH_REMATCH[5]:-}"
+    if [[ ! -f "${file}" || -L "${file}" ]]; then
+      fail "旧版 APT 停用源备份不是安全的普通文件：${file}"
+      return 1
+    fi
+
+    if [[ -n "${old_index}" ]]; then
+      target="${source_dir}/${source_name}.${stamp}.${old_index}.disabled"
+    else
+      target="${source_dir}/${source_name}.${stamp}.disabled"
+    fi
+    if [[ -e "${target}" || -L "${target}" ]]; then
+      target="$(unique_disabled_source_path "${source_dir}/${source_name}" "${stamp}")" || return 1
+    fi
+    mv -- "${file}" "${target}" || return 1
+    warn "已迁移旧版 APT 停用源备份：${file} -> ${target}"
+  done
+}
+
 prepare_apt_source_directories() {
   local source_dir="/etc/apt/sources.list.d"
   [[ -d /etc/apt && ! -L /etc/apt ]] || {
@@ -903,6 +952,7 @@ prepare_apt_source_directories() {
     fail "APT 扩展源目录不是安全的真实目录：${source_dir}"
     return 1
   }
+  migrate_legacy_disabled_source_files "${source_dir}"
 }
 
 rollback_official_sources() {
@@ -1089,7 +1139,7 @@ activate_official_sources() (
 
   for file in "${source_files[@]}"; do
     exit_if_source_transaction_interrupted
-    disabled="$(unique_source_backup_path "${file}" "disabled.${stamp}")" || {
+    disabled="$(unique_disabled_source_path "${file}" "${stamp}")" || {
       rollback_failed=1
       break
     }
@@ -1517,10 +1567,11 @@ validate_install_state_values() {
   for value in "${performance_values[@]}"; do
     validate_optional_positive_decimal "${value}" || return 1
   done
-  if [[ -n "${STORED_NETDEV_BUDGET_USECS}" ]] &&
-     (( 10#${STORED_NETDEV_BUDGET_USECS} > 2147483647 )); then
-    return 1
-  fi
+  for value in "${STORED_NETDEV_BUDGET_USECS}" "${STORED_IPFRAG_HIGH_THRESH}"; do
+    if [[ -n "${value}" ]] && (( 10#${value} > 2147483647 )); then
+      return 1
+    fi
+  done
 }
 
 write_install_state() {
@@ -2376,6 +2427,11 @@ default_setup() {
       fi
       resume_pending=1
       warn "检测到同一 main2 版本上次应用未完成，将按上次记录参数继续重试。"
+    elif [[ "${PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN}" == "1" &&
+            "${PENDING_REQUIRES_MANAGED_OVERWRITE}" == "0" ]]; then
+      restore_stored_settings force || return 1
+      resume_pending=1
+      warn "检测到旧 main2 版本未完成且不需要人工文件覆盖，将按上次记录参数由当前版本继续重试。"
     else
       warn "检测到其他 main2 版本留下的未完成应用，现有系统配置未自动覆盖。"
       if [[ "${PENDING_MANAGED_OVERWRITE_REQUIREMENT_KNOWN}" != "1" ||
