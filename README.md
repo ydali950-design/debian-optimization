@@ -2,7 +2,7 @@
 
 Debian / Ubuntu relay / VPN landing host network optimization scripts.
 
-这个仓库用于 Debian、Ubuntu 中转机、VPN 落地机、代理网关等场景的网络优化。脚本目标是在速度、稳定性和内存占用之间取得比较激进但可长期运行的平衡。
+这个仓库用于 Debian、Ubuntu代理网关等场景的网络优化。脚本目标是在速度、稳定性和内存占用之间取得比较激进但可长期运行的平衡。
 
 ## 功能
 
